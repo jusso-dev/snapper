@@ -6,3 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+snapper-core = { path = "../snapper-core" }
+image = "0.25"
+thiserror = "1"
+xcap = "0.4"
