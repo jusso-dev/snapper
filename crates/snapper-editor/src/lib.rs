@@ -6,7 +6,7 @@
 //!
 //! Inter is stored in `assets/` under the SIL Open Font License (`assets/OFL.txt`).
 
-mod render;
+pub mod render;
 
 pub use render::flatten;
 

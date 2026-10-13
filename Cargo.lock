@@ -3980,8 +3980,11 @@ version = "0.0.1"
 dependencies = [
  "eframe",
  "egui",
+ "image 0.25.10",
  "snapper-capture",
  "snapper-core",
+ "snapper-editor",
+ "tracing",
 ]
 
 [[package]]

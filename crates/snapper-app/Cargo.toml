@@ -8,5 +8,8 @@ license.workspace = true
 [dependencies]
 snapper-core = { path = "../snapper-core" }
 snapper-capture = { path = "../snapper-capture" }
+snapper-editor = { path = "../snapper-editor" }
 eframe = "0.29"
 egui = "0.29"
+image = { version = "0.25", default-features = false, features = ["png"] }
+tracing = "0.1"
