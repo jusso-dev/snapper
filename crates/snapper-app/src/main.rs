@@ -4,6 +4,7 @@ mod hotkeys;
 mod login;
 mod output;
 mod overlay;
+mod settings_ui;
 mod shell;
 mod single_instance;
 mod tray;
@@ -67,6 +68,11 @@ fn main() {
         }
     }
 
+    if open_settings_requested(&args) {
+        settings = load_settings();
+        settings_ui::run(settings.clone());
+    }
+
     let mut last_region: Option<Rect> = None;
     loop {
         settings = load_settings();
@@ -106,6 +112,10 @@ fn perform(command: Command, settings: &Settings, last_region: &mut Option<Rect>
             }
             true
         }
+        Command::OpenSettings => {
+            settings_ui::run(settings.clone());
+            true
+        }
     }
 }
 
@@ -140,6 +150,10 @@ fn debug_overlay() -> Result<overlay::OverlayResult, String> {
     };
     let frozen = capturer.capture_all().map_err(|err| err.to_string())?;
     Ok(overlay::run_overlay(frozen, monitors, windows))
+}
+
+fn open_settings_requested(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == "--open-settings")
 }
 
 fn open_editor_argument(args: &[String]) -> Result<Option<String>, &'static str> {

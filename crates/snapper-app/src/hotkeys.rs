@@ -86,6 +86,98 @@ pub fn parse(chord: &str) -> Result<HotKey, HotkeyParseError> {
     Ok(HotKey::new(mods, key))
 }
 
+/// Canonical settings chord, such as `Ctrl+Shift+R` or `PrintScreen`.
+///
+/// Modifier order is Ctrl, Alt, Shift, then Super. The result is accepted by
+/// [`parse`] for every key [`parse`] itself accepts. Any other key is `Unknown`.
+pub fn format(hotkey: &HotKey) -> String {
+    let mut parts = Vec::new();
+    if hotkey.mods.contains(Modifiers::CONTROL) {
+        parts.push("Ctrl");
+    }
+    if hotkey.mods.contains(Modifiers::ALT) {
+        parts.push("Alt");
+    }
+    if hotkey.mods.contains(Modifiers::SHIFT) {
+        parts.push("Shift");
+    }
+    if hotkey.mods.contains(Modifiers::SUPER) {
+        parts.push("Super");
+    }
+    parts.push(format_code(hotkey.key));
+    parts.join("+")
+}
+
+fn format_code(key: Code) -> &'static str {
+    match key {
+        Code::PrintScreen => "PrintScreen",
+        Code::Escape => "Escape",
+        Code::Space => "Space",
+        Code::Tab => "Tab",
+        Code::Enter => "Enter",
+        Code::Backspace => "Backspace",
+        Code::Delete => "Delete",
+        Code::Insert => "Insert",
+        Code::ArrowUp => "Up",
+        Code::ArrowDown => "Down",
+        Code::ArrowLeft => "Left",
+        Code::ArrowRight => "Right",
+        Code::PageUp => "PageUp",
+        Code::PageDown => "PageDown",
+        Code::Home => "Home",
+        Code::End => "End",
+        Code::F1 => "F1",
+        Code::F2 => "F2",
+        Code::F3 => "F3",
+        Code::F4 => "F4",
+        Code::F5 => "F5",
+        Code::F6 => "F6",
+        Code::F7 => "F7",
+        Code::F8 => "F8",
+        Code::F9 => "F9",
+        Code::F10 => "F10",
+        Code::F11 => "F11",
+        Code::F12 => "F12",
+        Code::KeyA => "A",
+        Code::KeyB => "B",
+        Code::KeyC => "C",
+        Code::KeyD => "D",
+        Code::KeyE => "E",
+        Code::KeyF => "F",
+        Code::KeyG => "G",
+        Code::KeyH => "H",
+        Code::KeyI => "I",
+        Code::KeyJ => "J",
+        Code::KeyK => "K",
+        Code::KeyL => "L",
+        Code::KeyM => "M",
+        Code::KeyN => "N",
+        Code::KeyO => "O",
+        Code::KeyP => "P",
+        Code::KeyQ => "Q",
+        Code::KeyR => "R",
+        Code::KeyS => "S",
+        Code::KeyT => "T",
+        Code::KeyU => "U",
+        Code::KeyV => "V",
+        Code::KeyW => "W",
+        Code::KeyX => "X",
+        Code::KeyY => "Y",
+        Code::KeyZ => "Z",
+        Code::Digit0 => "0",
+        Code::Digit1 => "1",
+        Code::Digit2 => "2",
+        Code::Digit3 => "3",
+        Code::Digit4 => "4",
+        Code::Digit5 => "5",
+        Code::Digit6 => "6",
+        Code::Digit7 => "7",
+        Code::Digit8 => "8",
+        Code::Digit9 => "9",
+        _ => "Unknown",
+    }
+}
+
 /// Registrations for one process. Dropping the service unregisters them.
 pub struct HotkeyService {
     /// Kept so the operating system registrations stay alive.
@@ -179,6 +271,15 @@ fn chords(hotkeys: &HotkeySettings) -> [(Action, &str); 5] {
         (Action::CaptureLastRegion, hotkeys.last_region.as_str()),
         (Action::Record, hotkeys.record.as_str()),
     ]
+}
+
+/// Drop queued press and release events.
+///
+/// Re-registering replaces the manager, but a chord pressed while the settings
+/// window was open would still be sitting in the process-wide queue. The shell
+/// would treat it as a new capture as soon as it started again.
+pub fn drain_events() {
+    while GlobalHotKeyEvent::receiver().try_recv().is_ok() {}
 }
 
 /// The next pressed hotkey, if one is waiting.
@@ -381,6 +482,26 @@ mod tests {
         );
         assert_chord("F1", None, Code::F1);
         assert_chord("Digit5", None, Code::Digit5);
+    }
+
+    #[test]
+    fn format_canonicalises_modifier_order_and_key_names() {
+        let cases = [
+            ("PrintScreen", "PrintScreen"),
+            ("Alt+PrintScreen", "Alt+PrintScreen"),
+            ("shift+ctrl+r", "Ctrl+Shift+R"),
+            (" cmd + option + KeyP ", "Alt+Super+P"),
+            ("f12", "F12"),
+            ("Digit5", "5"),
+            ("up", "Up"),
+        ];
+        for (input, expected) in cases {
+            let hotkey = parse(input).unwrap_or_else(|err| panic!("{input}: {err}"));
+            let shown = format(&hotkey);
+            assert_eq!(shown, expected, "{input}");
+            let again = parse(&shown).unwrap_or_else(|err| panic!("{shown}: {err}"));
+            assert_eq!(again.id(), hotkey.id(), "{input}");
+        }
     }
 
     #[test]

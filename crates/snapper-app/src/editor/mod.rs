@@ -16,6 +16,7 @@ use tools::{
     style_from_settings, zoom_to_fit, zoom_wheel, Action, CommandKey, PointerEvent, PointerKind,
     TextDraft, Tool, ToolSession, View,
 };
+pub(crate) use tools::{format_colour, parse_colour};
 
 /// Annotation window.
 pub struct EditorApp {
