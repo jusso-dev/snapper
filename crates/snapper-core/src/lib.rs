@@ -1,6 +1,7 @@
 //! Shared types for Snapper.
 
 pub mod settings;
+pub mod template;
 
 pub use settings::Settings;
 
