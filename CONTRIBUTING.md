@@ -24,14 +24,14 @@ If a platform dependency prevents a check, include the exact command, platform, 
 ## Make a change
 
 1. Find an open issue that matches the change. If an issue asks contributors to claim it, comment there and wait for confirmation before starting.
-2. Keep a pull request focused on one issue. Avoid changing platform behavior or public interfaces beyond the issue's scope.
-3. Add or update tests for behavior changes. For rendered-output changes, update golden images only when the expected output intentionally changed; explain the reason in the pull request.
+2. Keep a pull request focused on one issue. Avoid changing platform behaviour or public interfaces beyond the issue's scope.
+3. Add or update tests for behaviour changes. For rendered-output changes, update golden images only when the expected output intentionally changed; explain the reason in the pull request.
 4. Use Australian English in user-facing documentation and comments.
 5. Run the checks above and review the final diff.
 
 ## Open a pull request
 
-Use a short, descriptive title. In the description, link the issue, explain the behavior change, list the commands you ran and their results, and call out platform-specific limitations. Do not include screenshots of features that are not implemented yet.
+Use a short, descriptive title. In the description, link the issue, explain the behaviour change, list the commands you ran and their results, and call out platform-specific limitations. Do not include screenshots of features that are not implemented yet.
 
 ## Platform notes
 
