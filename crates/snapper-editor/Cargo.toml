@@ -6,3 +6,11 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+snapper-core = { path = "../snapper-core" }
+tiny-skia = "0.11"
+cosmic-text = { version = "0.12", default-features = false, features = ["std", "swash"] }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+serde_json = "1"
