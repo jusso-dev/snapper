@@ -1,4 +1,5 @@
 mod editor;
+mod output;
 mod overlay;
 
 fn main() {
