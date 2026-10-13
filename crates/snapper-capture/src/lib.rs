@@ -24,9 +24,6 @@ pub struct MonitorInfo {
 }
 
 /// A window the user can capture.
-///
-/// Window enumeration is filled in by a later issue. The trait includes it so
-/// callers can depend on one backend interface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WindowInfo {
     pub id: u64,
@@ -69,6 +66,27 @@ pub trait Capturer: Send + Sync {
 
     /// Capture one window by [`WindowInfo::id`].
     fn capture_window(&self, id: u64) -> Result<Image, CaptureError>;
+}
+
+/// The front-most window whose rectangle contains `(x, y)`.
+///
+/// `windows` is front-first, which is the order [`Capturer::windows`] returns.
+/// The right and bottom edges are exclusive, so adjacent windows do not both
+/// contain the shared edge. A zero-size rectangle contains nothing.
+pub fn window_at(windows: &[WindowInfo], x: i32, y: i32) -> Option<&WindowInfo> {
+    windows
+        .iter()
+        .find(|window| rect_contains(&window.rect, x, y))
+}
+
+fn rect_contains(rect: &Rect, x: i32, y: i32) -> bool {
+    let left = i64::from(rect.x);
+    let top = i64::from(rect.y);
+    let right = left + i64::from(rect.width);
+    let bottom = top + i64::from(rect.height);
+    let x = i64::from(x);
+    let y = i64::from(y);
+    x >= left && y >= top && x < right && y < bottom
 }
 
 /// Backend selected for this process.
@@ -160,5 +178,46 @@ mod tests {
             None => std::env::remove_var("WAYLAND_DISPLAY"),
         }
         assert_eq!(capturer.name(), "xcap");
+    }
+
+    fn window(id: u64, x: i32, y: i32, width: u32, height: u32) -> WindowInfo {
+        WindowInfo {
+            id,
+            title: format!("window {id}"),
+            app_name: "app".to_owned(),
+            rect: Rect {
+                x,
+                y,
+                width,
+                height,
+            },
+            is_minimised: false,
+        }
+    }
+
+    #[test]
+    fn window_at_picks_the_front_window() {
+        let front = window(1, 0, 0, 10, 10);
+        let behind = window(2, 5, 5, 10, 10);
+        let windows = [front, behind];
+        assert_eq!(window_at(&windows, 6, 6).map(|window| window.id), Some(1));
+        assert_eq!(window_at(&windows, 12, 12).map(|window| window.id), Some(2));
+    }
+
+    #[test]
+    fn window_at_misses_outside_and_the_exclusive_edge() {
+        let windows = [window(1, -4, -2, 4, 2)];
+        assert_eq!(window_at(&windows, -4, -2).map(|window| window.id), Some(1));
+        assert_eq!(window_at(&windows, -1, -1).map(|window| window.id), Some(1));
+        assert_eq!(window_at(&windows, 0, -1), None);
+        assert_eq!(window_at(&windows, -1, 0), None);
+        assert_eq!(window_at(&windows, -5, -2), None);
+        assert_eq!(window_at(&[], 0, 0), None);
+    }
+
+    #[test]
+    fn window_at_ignores_a_zero_size_rect() {
+        let windows = [window(1, 0, 0, 0, 10)];
+        assert_eq!(window_at(&windows, 0, 0), None);
     }
 }
