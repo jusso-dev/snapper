@@ -10,3 +10,7 @@ snapper-core = { path = "../snapper-core" }
 image = "0.25"
 thiserror = "1"
 xcap = "0.4"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { version = "0.9", features = ["tokio"] }
+tokio = { version = "1", features = ["rt", "net", "time", "io-util", "sync"] }
