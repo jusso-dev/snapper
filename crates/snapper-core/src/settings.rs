@@ -130,6 +130,11 @@ pub struct Settings {
     pub output: OutputSettings,
     /// Annotation editor preferences.
     pub editor: EditorSettings,
+    /// Start Snapper when the user signs in.
+    ///
+    /// The tray app applies this flag on launch. The settings window that
+    /// edits it is a later issue.
+    pub start_at_login: bool,
     /// Unknown top-level keys, preserved across save.
     #[serde(flatten)]
     pub extra: toml::Table,
@@ -142,6 +147,7 @@ impl Default for Settings {
             hotkeys: HotkeySettings::default(),
             output: OutputSettings::default(),
             editor: EditorSettings::default(),
+            start_at_login: false,
             extra: toml::Table::new(),
         }
     }
@@ -271,6 +277,7 @@ mod tests {
         assert!(round.output.copy_to_clipboard);
         assert!(!round.output.open_editor);
         assert_eq!(round.output.jpeg_quality, 90);
+        assert!(!round.start_at_login);
     }
 
     #[test]
@@ -318,6 +325,7 @@ mod tests {
         assert_eq!(loaded.output.jpeg_quality, 90);
         assert_eq!(loaded.output.format, ImageFormat::Png);
         assert_eq!(loaded.editor, EditorSettings::default());
+        assert!(!loaded.start_at_login);
         assert_eq!(loaded.version, SETTINGS_VERSION);
     }
 

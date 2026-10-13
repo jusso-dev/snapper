@@ -1,20 +1,59 @@
+mod dispatch;
 mod editor;
+mod hotkeys;
+mod login;
 mod output;
 mod overlay;
+mod shell;
+mod single_instance;
+mod tray;
+
+use std::sync::{mpsc, Arc, Mutex};
+
+use snapper_core::{Rect, Settings};
+
+use dispatch::Command;
+use tray::Action;
 
 fn main() {
     let verbose = std::env::args().any(|arg| arg == "--verbose" || arg == "-v");
     let _log = snapper_core::logging::init("snapper-app", verbose);
-    match open_editor_path() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+
+    let listener = match single_instance::claim(&args) {
+        Ok(single_instance::Claim::Forwarded) => std::process::exit(0),
+        Ok(single_instance::Claim::Primary(listener)) => listener,
+        Err(err) => {
+            eprintln!("single instance failed: {err}");
+            std::process::exit(1);
+        }
+    };
+
+    // Debug tool: print the overlay result and leave. A second process
+    // forwards the flag instead of opening its own overlay.
+    if args.iter().any(|arg| arg == "--debug-overlay") {
+        match debug_overlay() {
+            Ok(result) => println!("{result:?}"),
+            Err(err) => {
+                eprintln!("overlay failed: {err}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    let mut settings = load_settings();
+    if let Err(err) = login::apply(settings.start_at_login) {
+        tracing::warn!(error = %err, "could not update start at login");
+    }
+
+    let ipc = spawn_ipc(listener);
+
+    match open_editor_argument(&args) {
         Ok(Some(path)) => match load_editor_image(&path) {
             Ok(image) => {
-                let settings = snapper_core::Settings::load().unwrap_or_else(|err| {
-                    eprintln!("settings failed, using defaults: {err}");
-                    snapper_core::Settings::default()
-                });
                 tracing::info!(path = %path, "opening editor");
-                editor::run_editor(snapper_editor::Document::new(image), settings);
-                return;
+                editor::run_editor(snapper_editor::Document::new(image), settings.clone());
             }
             Err(err) => {
                 eprintln!("editor failed: {err}");
@@ -27,20 +66,68 @@ fn main() {
             std::process::exit(1);
         }
     }
-    if std::env::args().any(|arg| arg == "--debug-overlay") {
-        match debug_overlay() {
-            Ok(result) => println!("{result:?}"),
+
+    let mut last_region: Option<Rect> = None;
+    loop {
+        settings = load_settings();
+        match shell::run(&settings.hotkeys, &ipc) {
+            Ok(Some(command)) => {
+                if !perform(command, &settings, &mut last_region) {
+                    break;
+                }
+            }
+            Ok(None) => break,
             Err(err) => {
-                eprintln!("overlay failed: {err}");
+                eprintln!("snapper failed: {err}");
                 std::process::exit(1);
             }
         }
-        return;
     }
-    println!(
-        "snapper {} (skeleton, GUI lands in M1)",
-        env!("CARGO_PKG_VERSION")
-    );
+}
+
+fn perform(command: Command, settings: &Settings, last_region: &mut Option<Rect>) -> bool {
+    match command {
+        Command::Action(Action::Quit) => false,
+        Command::Action(action) => dispatch::perform(action, settings, last_region),
+        Command::OpenEditor(path) => {
+            match load_editor_image(&path) {
+                Ok(image) => {
+                    tracing::info!(path = %path, "opening editor");
+                    editor::run_editor(snapper_editor::Document::new(image), settings.clone());
+                }
+                Err(err) => output::notify("Snapper", &format!("editor failed: {err}")),
+            }
+            true
+        }
+        Command::DebugOverlay => {
+            match debug_overlay() {
+                Ok(result) => println!("{result:?}"),
+                Err(err) => output::notify("Snapper", &format!("overlay failed: {err}")),
+            }
+            true
+        }
+    }
+}
+
+fn spawn_ipc(
+    listener: interprocess::local_socket::Listener,
+) -> Arc<Mutex<mpsc::Receiver<Vec<String>>>> {
+    let (tx, rx) = mpsc::channel();
+    if let Err(err) = std::thread::Builder::new()
+        .name("snapper-ipc".to_owned())
+        .spawn(move || single_instance::serve(listener, tx))
+    {
+        eprintln!("single instance listener failed: {err}");
+        std::process::exit(1);
+    }
+    Arc::new(Mutex::new(rx))
+}
+
+fn load_settings() -> Settings {
+    Settings::load().unwrap_or_else(|err| {
+        eprintln!("settings failed, using defaults: {err}");
+        Settings::default()
+    })
 }
 
 fn debug_overlay() -> Result<overlay::OverlayResult, String> {
@@ -55,12 +142,12 @@ fn debug_overlay() -> Result<overlay::OverlayResult, String> {
     Ok(overlay::run_overlay(frozen, monitors, windows))
 }
 
-fn open_editor_path() -> Result<Option<String>, &'static str> {
-    let mut args = std::env::args().skip(1);
+fn open_editor_argument(args: &[String]) -> Result<Option<String>, &'static str> {
+    let mut args = args.iter();
     while let Some(arg) = args.next() {
         if arg == "--open-editor" {
             return match args.next() {
-                Some(path) => Ok(Some(path)),
+                Some(path) => Ok(Some(path.clone())),
                 None => Err("--open-editor needs an image path"),
             };
         }

@@ -31,6 +31,12 @@ These prompts are the documented portal behaviour. This repository's Windows bui
 - The screenshot is a temporary file with a `file://` URI. Snapper loads it and deletes it, including when the file is not a readable image.
 - Recording is not part of this backend.
 
+## Global hotkeys
+
+`global-hotkey` 0.6 registers shortcuts through X11. On a Wayland session that grab does not reach other applications, and Snapper does not call the XDG GlobalShortcuts portal (`org.freedesktop.portal.GlobalShortcuts`). That portal is the Wayland path for compositor-wide shortcuts and is out of scope here. Use the tray menu on Wayland. `SNAPPER_FORCE_X11=1` only switches capture back to `xcap`; it does not enable GlobalShortcuts.
+
+A hotkey the compositor or another program already owns is reported as a conflict. The notification names the action and the chord.
+
 ## Try it
 
 ```sh
