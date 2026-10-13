@@ -321,6 +321,13 @@ fn hold_linux_clipboard(
     Ok(())
 }
 
+/// Show a notification. A failure is logged and does not stop the caller.
+pub fn notify(title: &str, body: &str) {
+    if let Err(err) = spawn_notification(title, body, None) {
+        tracing::warn!(error = %err, "notification failed");
+    }
+}
+
 fn spawn_notification(title: &str, body: &str, open_folder: Option<PathBuf>) -> Result<(), String> {
     let title = title.to_owned();
     let body = body.to_owned();
