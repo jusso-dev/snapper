@@ -1,5 +1,6 @@
 //! Shared types for Snapper.
 
+pub mod logging;
 pub mod settings;
 pub mod template;
 
