@@ -10,7 +10,7 @@ use eframe::egui::{
 use snapper_core::Settings;
 use snapper_editor::{Document, Edit, Item, Point, Rgba, Shape, Style};
 
-use output::{dispatch, flattened, OutputRequest};
+use output::{flattened, perform, OutputRequest};
 use tools::{
     close_needs_confirm, image_to_screen, interpret, remember_style, screen_to_image,
     style_from_settings, zoom_to_fit, zoom_wheel, Action, CommandKey, PointerEvent, PointerKind,
@@ -86,10 +86,9 @@ impl EditorApp {
         if let Some(edit) = self.session.commit_text() {
             self.apply_edit(edit);
         }
-        let image = flattened(&self.doc);
-        dispatch(request, &image);
-        self.output_note = format!("{request:?} {}x{}", image.width, image.height);
-        if request == OutputRequest::Save {
+        let done = perform(request, &self.doc, &self.settings);
+        self.output_note = done.note;
+        if done.saved {
             self.dirty = false;
         }
     }
