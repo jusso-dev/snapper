@@ -1,11 +1,15 @@
 //! Capture backends.
 //!
 //! [`default_capturer`] returns [`XcapCapturer`] on Windows, macOS and X11.
-//! When `WAYLAND_DISPLAY` is set it returns a stub that reports
-//! [`CaptureError::Unsupported`] until the Wayland backend lands.
+//! On Linux, a set `WAYLAND_DISPLAY` selects the XDG portal capturer unless
+//! `SNAPPER_FORCE_X11` is set. See `docs/platforms/linux-wayland.md`.
 
 mod stitch;
+mod wayland_backend;
 mod xcap_backend;
+
+#[cfg(target_os = "linux")]
+pub use wayland_backend::WaylandPortalCapturer;
 
 pub use stitch::{stitch, PlacedCapture};
 pub use xcap_backend::XcapCapturer;
@@ -91,52 +95,21 @@ fn rect_contains(rect: &Rect, x: i32, y: i32) -> bool {
 
 /// Backend selected for this process.
 ///
-/// A set `WAYLAND_DISPLAY` selects the Wayland stub. Every other session uses
-/// [`XcapCapturer`].
+/// On Linux, `WAYLAND_DISPLAY` selects the XDG portal unless `SNAPPER_FORCE_X11`
+/// is set. Every other case uses [`XcapCapturer`].
 pub fn default_capturer() -> Box<dyn Capturer + Send + Sync> {
-    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-        Box::new(WaylandStub)
-    } else {
-        Box::new(XcapCapturer)
+    let use_portal = wayland_backend::portal_selected(
+        cfg!(target_os = "linux"),
+        std::env::var_os("WAYLAND_DISPLAY").is_some(),
+        std::env::var_os("SNAPPER_FORCE_X11").is_some(),
+    );
+    #[cfg(target_os = "linux")]
+    if use_portal {
+        return Box::new(WaylandPortalCapturer::new());
     }
-}
-
-struct WaylandStub;
-
-impl Capturer for WaylandStub {
-    fn name(&self) -> &'static str {
-        "wayland"
-    }
-
-    fn monitors(&self) -> Result<Vec<MonitorInfo>, CaptureError> {
-        Err(CaptureError::Unsupported(
-            "Wayland capture is not implemented yet",
-        ))
-    }
-
-    fn capture_monitor(&self, _id: u32) -> Result<Image, CaptureError> {
-        Err(CaptureError::Unsupported(
-            "Wayland capture is not implemented yet",
-        ))
-    }
-
-    fn capture_all(&self) -> Result<Image, CaptureError> {
-        Err(CaptureError::Unsupported(
-            "Wayland capture is not implemented yet",
-        ))
-    }
-
-    fn windows(&self) -> Result<Vec<WindowInfo>, CaptureError> {
-        Err(CaptureError::Unsupported(
-            "window list on Wayland is not supported",
-        ))
-    }
-
-    fn capture_window(&self, _id: u64) -> Result<Image, CaptureError> {
-        Err(CaptureError::Unsupported(
-            "window capture on Wayland is not supported",
-        ))
-    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = use_portal;
+    Box::new(XcapCapturer)
 }
 
 #[cfg(test)]
@@ -147,36 +120,49 @@ mod tests {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    #[test]
-    fn wayland_display_selects_the_stub() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
-        let previous = std::env::var_os("WAYLAND_DISPLAY");
-        std::env::set_var("WAYLAND_DISPLAY", "wayland-0");
-        let capturer = default_capturer();
-        let monitors = capturer.monitors();
-        let windows = capturer.windows();
-        let window = capturer.capture_window(1);
+    fn restore(name: &str, previous: Option<std::ffi::OsString>) {
         match previous {
-            Some(value) => std::env::set_var("WAYLAND_DISPLAY", value),
-            None => std::env::remove_var("WAYLAND_DISPLAY"),
+            Some(value) => std::env::set_var(name, value),
+            None => std::env::remove_var(name),
         }
+    }
 
-        assert_eq!(capturer.name(), "wayland");
-        assert!(matches!(monitors, Err(CaptureError::Unsupported(_))));
-        assert!(matches!(windows, Err(CaptureError::Unsupported(_))));
-        assert!(matches!(window, Err(CaptureError::Unsupported(_))));
+    #[test]
+    fn wayland_display_selects_the_portal_only_on_linux() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let previous_wayland = std::env::var_os("WAYLAND_DISPLAY");
+        let previous_force = std::env::var_os("SNAPPER_FORCE_X11");
+        std::env::set_var("WAYLAND_DISPLAY", "wayland-0");
+        std::env::remove_var("SNAPPER_FORCE_X11");
+        let portal = default_capturer();
+        std::env::set_var("SNAPPER_FORCE_X11", "1");
+        let forced = default_capturer();
+        restore("WAYLAND_DISPLAY", previous_wayland);
+        restore("SNAPPER_FORCE_X11", previous_force);
+
+        assert_eq!(forced.name(), "xcap");
+        if cfg!(target_os = "linux") {
+            assert_eq!(portal.name(), "wayland");
+            assert!(matches!(
+                portal.windows(),
+                Err(CaptureError::Unsupported(message)) if message.contains("Wayland")
+            ));
+        } else {
+            // The portal crate is Linux-only, so a stray WAYLAND_DISPLAY stays on xcap.
+            assert_eq!(portal.name(), "xcap");
+        }
     }
 
     #[test]
     fn other_sessions_use_xcap() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        let previous = std::env::var_os("WAYLAND_DISPLAY");
+        let previous_wayland = std::env::var_os("WAYLAND_DISPLAY");
+        let previous_force = std::env::var_os("SNAPPER_FORCE_X11");
         std::env::remove_var("WAYLAND_DISPLAY");
+        std::env::remove_var("SNAPPER_FORCE_X11");
         let capturer = default_capturer();
-        match previous {
-            Some(value) => std::env::set_var("WAYLAND_DISPLAY", value),
-            None => std::env::remove_var("WAYLAND_DISPLAY"),
-        }
+        restore("WAYLAND_DISPLAY", previous_wayland);
+        restore("SNAPPER_FORCE_X11", previous_force);
         assert_eq!(capturer.name(), "xcap");
     }
 
