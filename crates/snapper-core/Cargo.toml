@@ -1,0 +1,8 @@
+[package]
+name = "snapper-core"
+description = "Shared types, settings and filename templates for Snapper"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

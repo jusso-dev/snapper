@@ -1,0 +1,8 @@
+[package]
+name = "snapper-app"
+description = "Snapper desktop tray app and editor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

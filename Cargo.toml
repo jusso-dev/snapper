@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/snapper-core",
+    "crates/snapper-capture",
+    "crates/snapper-editor",
+    "crates/snapper-upload",
+    "crates/snapper-cli",
+    "crates/snapper-app",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/jusso-dev/snapper"
+rust-version = "1.80"

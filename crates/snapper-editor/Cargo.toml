@@ -1,0 +1,8 @@
+[package]
+name = "snapper-editor"
+description = "Annotation document model and renderer for Snapper"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

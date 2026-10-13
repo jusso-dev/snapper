@@ -1,0 +1,8 @@
+[package]
+name = "snapper-upload"
+description = "Upload target plugin interface for Snapper"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
