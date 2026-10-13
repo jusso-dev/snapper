@@ -37,6 +37,8 @@ crates/
 
 Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and the ADRs in [docs/adr](docs/adr).
 
+For setup and development, see the [user guide](docs/guide/README.md), [contribution guide](CONTRIBUTING.md), [Code of Conduct](CODE_OF_CONDUCT.md), and [platform permission notes](docs/platforms/).
+
 ## Roadmap
 
 - **M0 Skeleton:** workspace, CI config, settings, logging
