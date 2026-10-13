@@ -1,5 +1,9 @@
 //! Shared types for Snapper.
 
+pub mod settings;
+
+pub use settings::Settings;
+
 /// A rectangle in physical pixels on the virtual desktop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rect {
