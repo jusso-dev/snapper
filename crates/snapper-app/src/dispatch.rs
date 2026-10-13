@@ -17,6 +17,7 @@ use crate::tray::Action;
 pub enum Command {
     Action(Action),
     OpenEditor(String),
+    OpenSettings,
     DebugOverlay,
 }
 
@@ -29,6 +30,7 @@ pub fn command_from_args(args: &[String]) -> Option<Command> {
                 let path = args.next()?.clone();
                 return Some(Command::OpenEditor(path));
             }
+            "--open-settings" => return Some(Command::OpenSettings),
             "--debug-overlay" => return Some(Command::DebugOverlay),
             _ => {}
         }
@@ -47,7 +49,7 @@ pub fn perform(action: Action, settings: &Settings, last_region: &mut Option<Rec
         Action::CaptureLastRegion => capture_last(settings, last_region),
         Action::Record => output::notify("Snapper", "recording is not available yet"),
         Action::OpenFolder => open_folder(settings),
-        Action::Settings => output::notify("Snapper", "settings window is not available yet"),
+        Action::Settings => crate::settings_ui::run(settings.clone()),
         Action::Quit => return false,
     }
     true
@@ -253,6 +255,10 @@ mod tests {
             Some(Command::OpenEditor("shot.png".to_owned()))
         );
         assert_eq!(command_from_args(&["--open-editor".to_owned()]), None);
+        assert_eq!(
+            command_from_args(&["--open-settings".to_owned()]),
+            Some(Command::OpenSettings)
+        );
     }
 
     #[test]

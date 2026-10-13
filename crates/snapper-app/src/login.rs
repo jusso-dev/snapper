@@ -1,7 +1,7 @@
 //! Apply [`snapper_core::Settings::start_at_login`].
 //!
-//! The settings window that edits the flag is a later issue. This only
-//! enables or disables the OS login entry for the current executable.
+//! The settings window calls this when the flag is saved. Startup calls it
+//! too, so a hand-edited settings file still takes effect.
 
 use auto_launch::AutoLaunchBuilder;
 

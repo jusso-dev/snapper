@@ -132,8 +132,8 @@ pub struct Settings {
     pub editor: EditorSettings,
     /// Start Snapper when the user signs in.
     ///
-    /// The tray app applies this flag on launch. The settings window that
-    /// edits it is a later issue.
+    /// The settings window applies this when the change is saved. The tray
+    /// app also applies it on launch, so a hand-edited file takes effect then.
     pub start_at_login: bool,
     /// Unknown top-level keys, preserved across save.
     #[serde(flatten)]

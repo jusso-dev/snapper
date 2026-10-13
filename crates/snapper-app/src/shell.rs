@@ -15,12 +15,15 @@ use snapper_core::settings::HotkeySettings;
 use crate::dispatch::{command_from_args, Command};
 use crate::hotkeys::{self, HotkeyService};
 use crate::output;
-use crate::tray;
+use crate::tray::{self, Action};
 
 struct Resident {
     /// The icon stays in the tray until process exit.
     _tray: tray_icon::TrayIcon,
-    hotkeys: HotkeyService,
+    /// `None` while a new manager is being created, or when the last
+    /// registration failed. The old manager is dropped before the new one
+    /// registers, so the OS releases those chords.
+    hotkeys: Option<HotkeyService>,
 }
 
 thread_local! {
@@ -69,25 +72,67 @@ pub fn run(
 }
 
 fn install(hotkeys: &HotkeySettings) -> Result<(), String> {
-    let already = RESIDENT.with(|slot| slot.borrow().is_some());
-    if already {
+    let (has_resident, has_hotkeys) = RESIDENT.with(|slot| {
+        let resident = slot.borrow();
+        let has_hotkeys = resident
+            .as_ref()
+            .and_then(|resident| resident.hotkeys.as_ref())
+            .is_some();
+        (resident.is_some(), has_hotkeys)
+    });
+    if has_hotkeys {
         return Ok(());
     }
+    // The tray is up but a settings save failed to register the new chords.
+    if has_resident {
+        return reregister(hotkeys);
+    }
     let (service, conflicts) = HotkeyService::register(hotkeys)?;
-    for (action, detail) in &conflicts {
+    notify_conflicts(&conflicts);
+    let tray = tray::build()?;
+    RESIDENT.with(|slot| {
+        *slot.borrow_mut() = Some(Resident {
+            _tray: tray,
+            hotkeys: Some(service),
+        });
+    });
+    Ok(())
+}
+
+/// Replace the registered chords.
+///
+/// Does nothing when the tray has not been created yet. The next shell start
+/// registers whatever is in settings. When the tray is already up, the previous
+/// [`HotkeyService`] is dropped before the new chords are registered.
+pub fn reregister(hotkeys: &HotkeySettings) -> Result<(), String> {
+    let ready = RESIDENT.with(|slot| slot.borrow().is_some());
+    if !ready {
+        return Ok(());
+    }
+    let previous = RESIDENT.with(|slot| {
+        slot.borrow_mut()
+            .as_mut()
+            .and_then(|resident| resident.hotkeys.take())
+    });
+    drop(previous);
+    let (service, conflicts) = HotkeyService::register(hotkeys)?;
+    notify_conflicts(&conflicts);
+    RESIDENT.with(|slot| {
+        if let Some(resident) = slot.borrow_mut().as_mut() {
+            resident.hotkeys = Some(service);
+        }
+    });
+    hotkeys::drain_events();
+    Ok(())
+}
+
+fn notify_conflicts(conflicts: &[(Action, String)]) {
+    for (action, detail) in conflicts {
         output::notify(
             "Snapper",
             &format!("Hotkey conflict: {}: {detail}", action.label()),
         );
     }
-    let tray = tray::build()?;
-    RESIDENT.with(|slot| {
-        *slot.borrow_mut() = Some(Resident {
-            _tray: tray,
-            hotkeys: service,
-        });
-    });
-    Ok(())
 }
 
 struct Shell {
@@ -131,7 +176,7 @@ impl eframe::App for Shell {
         let pressed = RESIDENT.with(|slot| {
             slot.borrow()
                 .as_ref()
-                .and_then(|resident| hotkeys::poll_pressed(&resident.hotkeys))
+                .and_then(|resident| resident.hotkeys.as_ref().and_then(hotkeys::poll_pressed))
         });
         if let Some(action) = pressed {
             self.trigger(Command::Action(action), ctx);
