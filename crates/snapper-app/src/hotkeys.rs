@@ -13,7 +13,7 @@ use std::fmt;
 
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
-use snapper_core::settings::HotkeySettings;
+use snapper_core::Settings;
 
 use crate::tray::Action;
 
@@ -191,9 +191,9 @@ impl HotkeyService {
     /// Parse failures, two actions that share a chord, and chords the OS
     /// refuses are conflicts. The `String` names the chord and the reason.
     /// Only a failure to create the manager is an error.
-    pub fn register(hotkeys: &HotkeySettings) -> Result<(Self, Vec<(Action, String)>), String> {
+    pub fn register(settings: &Settings) -> Result<(Self, Vec<(Action, String)>), String> {
         let manager = GlobalHotKeyManager::new().map_err(|err| err.to_string())?;
-        let (bindings, mut conflicts) = plan(hotkeys);
+        let (bindings, mut conflicts) = plan(settings);
         let mut by_id = HashMap::new();
         for binding in bindings {
             match manager.register(binding.hotkey) {
@@ -226,11 +226,11 @@ struct Binding {
     chord: String,
 }
 
-fn plan(hotkeys: &HotkeySettings) -> (Vec<Binding>, Vec<(Action, String)>) {
+fn plan(settings: &Settings) -> (Vec<Binding>, Vec<(Action, String)>) {
     let mut bindings = Vec::new();
     let mut conflicts = Vec::new();
     let mut seen: Vec<(u32, Action, String)> = Vec::new();
-    for (action, chord) in chords(hotkeys) {
+    for (action, chord) in chords(settings) {
         let chord = chord.trim();
         if chord.is_empty() {
             conflicts.push((action, "hotkey is empty".to_owned()));
@@ -263,14 +263,27 @@ fn plan(hotkeys: &HotkeySettings) -> (Vec<Binding>, Vec<(Action, String)>) {
     (bindings, conflicts)
 }
 
-fn chords(hotkeys: &HotkeySettings) -> [(Action, &str); 5] {
-    [
-        (Action::CaptureRegion, hotkeys.region.as_str()),
-        (Action::CaptureWindow, hotkeys.window.as_str()),
-        (Action::CaptureFull, hotkeys.full_screen.as_str()),
-        (Action::CaptureLastRegion, hotkeys.last_region.as_str()),
-        (Action::Record, hotkeys.record.as_str()),
-    ]
+fn chords(settings: &Settings) -> Vec<(Action, String)> {
+    let hotkeys = &settings.hotkeys;
+    let mut chords = vec![
+        (Action::CaptureRegion, hotkeys.region.clone()),
+        (Action::CaptureWindow, hotkeys.window.clone()),
+        (Action::CaptureFull, hotkeys.full_screen.clone()),
+        (Action::CaptureLastRegion, hotkeys.last_region.clone()),
+        (Action::Record, hotkeys.record.clone()),
+        (Action::Ocr, hotkeys.ocr.clone()),
+        (Action::ScrollCapture, hotkeys.scroll.clone()),
+    ];
+    for (index, workflow) in settings.workflows.iter().enumerate() {
+        if workflow.hotkey.trim().is_empty() {
+            continue;
+        }
+        let Ok(index) = u16::try_from(index) else {
+            continue;
+        };
+        chords.push((Action::Workflow(index), workflow.hotkey.clone()));
+    }
+    chords
 }
 
 /// Drop queued press and release events.
@@ -428,6 +441,7 @@ fn digit(ch: char) -> Option<Code> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use snapper_core::settings::HotkeySettings;
 
     fn assert_chord(chord: &str, mods: Option<Modifiers>, key: Code) {
         let parsed = parse(chord).unwrap_or_else(|err| panic!("{chord}: {err}"));
@@ -519,9 +533,40 @@ mod tests {
 
     #[test]
     fn default_settings_have_no_parse_conflicts() {
-        let (bindings, conflicts) = plan(&HotkeySettings::default());
+        let (bindings, conflicts) = plan(&Settings::default());
         assert!(conflicts.is_empty(), "{conflicts:?}");
-        assert_eq!(bindings.len(), 5);
+        assert_eq!(bindings.len(), 7);
+        assert!(bindings.iter().any(|binding| binding.action == Action::Ocr));
+        assert!(bindings
+            .iter()
+            .any(|binding| binding.action == Action::ScrollCapture));
+    }
+
+    #[test]
+    fn an_empty_workflow_hotkey_is_skipped() {
+        let mut settings = Settings::default();
+        settings.workflows.push(snapper_core::settings::Workflow {
+            name: "Bug report".to_owned(),
+            hotkey: "  ".to_owned(),
+            capture: snapper_core::settings::CaptureKind::Region,
+            steps: Vec::new(),
+            link_format: snapper_core::settings::LinkFormat::Markdown,
+        });
+        settings.workflows.push(snapper_core::settings::Workflow {
+            name: "Upload".to_owned(),
+            hotkey: "Ctrl+Shift+U".to_owned(),
+            capture: snapper_core::settings::CaptureKind::Region,
+            steps: Vec::new(),
+            link_format: snapper_core::settings::LinkFormat::Markdown,
+        });
+        let (bindings, conflicts) = plan(&settings);
+        assert!(conflicts.is_empty(), "{conflicts:?}");
+        assert!(bindings
+            .iter()
+            .any(|binding| binding.action == Action::Workflow(1)));
+        assert!(!bindings
+            .iter()
+            .any(|binding| matches!(binding.action, Action::Workflow(0))));
     }
 
     #[test]
@@ -531,7 +576,11 @@ mod tests {
             window: defaults.region.clone(),
             ..defaults
         };
-        let (bindings, conflicts) = plan(&hotkeys);
+        let settings = Settings {
+            hotkeys,
+            ..Settings::default()
+        };
+        let (bindings, conflicts) = plan(&settings);
         assert!(bindings
             .iter()
             .any(|binding| binding.action == Action::CaptureRegion));
@@ -552,7 +601,11 @@ mod tests {
             record: "Nope".to_owned(),
             ..HotkeySettings::default()
         };
-        let (bindings, conflicts) = plan(&hotkeys);
+        let settings = Settings {
+            hotkeys,
+            ..Settings::default()
+        };
+        let (bindings, conflicts) = plan(&settings);
         assert!(!bindings
             .iter()
             .any(|binding| binding.action == Action::Record));

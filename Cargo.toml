@@ -4,9 +4,12 @@ members = [
     "crates/snapper-core",
     "crates/snapper-capture",
     "crates/snapper-editor",
+    "crates/snapper-ocr",
+    "crates/snapper-record",
     "crates/snapper-upload",
     "crates/snapper-cli",
     "crates/snapper-app",
+    "examples/plugin-echo",
 ]
 
 [workspace.package]

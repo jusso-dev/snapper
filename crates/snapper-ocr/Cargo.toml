@@ -1,0 +1,32 @@
+[package]
+name = "snapper-ocr"
+description = "OCR engines and local secret redaction for Snapper"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# Linux only. Requires the tesseract library and headers at build time.
+tesseract = ["dep:leptess"]
+
+[dependencies]
+snapper-core = { path = "../snapper-core" }
+thiserror = "1"
+regex = "1"
+image = { version = "0.25", default-features = false, features = ["png"] }
+leptess = { version = "0.14", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-vision = "0.3"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.61", features = [
+    "Media_Ocr",
+    "Graphics_Imaging",
+    "Storage_Streams",
+    "Foundation",
+    "Foundation_Collections",
+] }

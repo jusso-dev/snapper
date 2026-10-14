@@ -9,10 +9,14 @@ license.workspace = true
 snapper-core = { path = "../snapper-core" }
 snapper-capture = { path = "../snapper-capture" }
 snapper-editor = { path = "../snapper-editor" }
-eframe = "0.29"
+snapper-ocr = { path = "../snapper-ocr" }
+snapper-record = { path = "../snapper-record" }
+snapper-upload = { path = "../snapper-upload" }
+eframe = { version = "0.29", features = ["accesskit"] }
 egui = "0.29"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 tracing = "0.1"
+thiserror = "1"
 arboard = "3"
 # 4.18 is the first 4.x release whose Windows toasts report a click.
 notify-rust = "4.18"
@@ -24,6 +28,43 @@ interprocess = "2"
 auto-launch = "0.5"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+enigo = "0.2"
+tokio = { version = "1", features = ["rt", "net", "time"] }
+minisign-verify = "0.2"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking"] }
+toml = "0.8"
+
+[dev-dependencies]
+minisign = "0.7"
+wiremock = "0.6"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 [build-dependencies]
 embed-resource = "2.5"
+
+# Read by `cargo packager`, ignored by cargo itself.
+# Formats: msi, nsis, dmg, app, appimage, deb, rpm. See docs/RELEASING.md.
+[package.metadata.packager]
+product-name = "Snapper"
+identifier = "au.jusso-dev.snapper"
+publisher = "Justin Middler"
+homepage = "https://github.com/jusso-dev/snapper"
+license-file = "../../LICENSE"
+icons = [
+    "icons/32x32.png",
+    "icons/128x128.png",
+    "icons/128x128@2x.png",
+    "icons/icon.png",
+    "icons/icon.ico",
+    "icons/icon.icns",
+]
+
+[package.metadata.packager.macos]
+minimum-system-version = "11.0"
+info-plist = "macos/Info.plist"
+
+[package.metadata.packager.nsis]
+installer-icon = "icons/icon.ico"
+
+[package.metadata.packager.wix]
+license = "../../LICENSE"

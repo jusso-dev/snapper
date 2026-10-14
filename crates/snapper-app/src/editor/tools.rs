@@ -62,6 +62,7 @@ pub fn interpret(ctrl: bool, key: CommandKey) -> Option<Action> {
         (true, CommandKey::Y) => Some(Action::Redo),
         (true, CommandKey::C) => Some(Action::Copy),
         (true, CommandKey::S) => Some(Action::Save),
+        (false, CommandKey::S) => Some(Action::Tool(Tool::Select)),
         (true, CommandKey::Enter) => Some(Action::CommitText),
         (false, CommandKey::A) => Some(Action::Tool(Tool::Arrow)),
         (false, CommandKey::R) => Some(Action::Tool(Tool::Rect)),
@@ -421,6 +422,7 @@ impl ToolSession {
             id: self.next_id,
             shape,
             style: self.style,
+            auto: false,
         })
     }
 
@@ -429,6 +431,7 @@ impl ToolSession {
             id: self.next_id,
             shape,
             style: self.style,
+            auto: false,
         };
         self.next_id = self.next_id.saturating_add(1);
         item
@@ -877,6 +880,10 @@ mod tests {
         assert_eq!(interpret(true, CommandKey::Y), Some(Action::Redo));
         assert_eq!(interpret(true, CommandKey::C), Some(Action::Copy));
         assert_eq!(interpret(true, CommandKey::S), Some(Action::Save));
+        assert_eq!(
+            interpret(false, CommandKey::S),
+            Some(Action::Tool(Tool::Select))
+        );
         assert_eq!(interpret(false, CommandKey::Delete), Some(Action::Delete));
         assert_eq!(interpret(true, CommandKey::Enter), Some(Action::CommitText));
     }
@@ -991,6 +998,7 @@ mod tests {
                 },
             },
             style: Style::default(),
+            auto: false,
         };
         doc.apply(Edit::Add(original.clone()));
         let mut tools = session();

@@ -1,0 +1,19 @@
+[package]
+name = "snapper-record"
+description = "GIF and MP4 screen recording for Snapper"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+snapper-core = { path = "../snapper-core" }
+snapper-capture = { path = "../snapper-capture" }
+thiserror = "1"
+gifski = "1"
+crossbeam-channel = "0.5"
+which = "7"
+imgref = "1"
+rgb = "0.8"
+
+[dev-dependencies]
+tempfile = "3"

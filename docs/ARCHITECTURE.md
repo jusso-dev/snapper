@@ -33,9 +33,9 @@ hotkey -> Action::CaptureRegion
 | Platform | Backend | Notes |
 |---|---|---|
 | Windows | `xcap` (DXGI / GDI) | Per-monitor DPI aware manifest required |
-| macOS | `xcap` (CoreGraphics), ScreenCaptureKit for recording | Needs Screen Recording permission |
+| macOS | `xcap` (CoreGraphics). Recording reuses that capturer; ScreenCaptureKit is not linked | Needs Screen Recording permission |
 | Linux X11 | `xcap` (XCB) | |
-| Linux Wayland | `ashpd` XDG Desktop Portal Screenshot and ScreenCast | User consent dialog per capture on some compositors |
+| Linux Wayland | `ashpd` XDG Desktop Portal Screenshot. ScreenCast recording is not implemented | User consent dialog per capture on some compositors. Scrolling capture is refused |
 
 All coordinates inside Snapper are physical pixels on the virtual desktop. Each `Image` carries its `scale_factor` so the editor can show it at logical size.
 

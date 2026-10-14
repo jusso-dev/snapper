@@ -29,7 +29,8 @@ These prompts are the documented portal behaviour. This repository's Windows bui
 - There is no portable window list on Wayland. `windows()` and `capture_window()` return "not supported on Wayland" instead of failing inside the backend.
 - The portal does not report monitor layout or scale. Snapper exposes one synthetic monitor named `Wayland`, id `1`, origin `(0, 0)`, scale `1.0`, and the width and height of the screenshot. `monitors()` takes a screenshot to learn that size.
 - The screenshot is a temporary file with a `file://` URI. Snapper loads it and deletes it, including when the file is not a readable image.
-- Recording is not part of this backend.
+- Recording is not part of this backend. `Recorder::start` returns an error on the portal capturer. The XDG ScreenCast portal and PipeWire are not implemented, and capturing a screenshot for every frame would prompt on every frame.
+- Scrolling capture is refused. Synthetic wheel events are not allowed on Wayland. Use an X11 session, or `SNAPPER_FORCE_X11=1` when XWayland capture is what you want.
 
 ## Global hotkeys
 

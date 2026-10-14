@@ -1,0 +1,9 @@
+[package]
+name = "snapper-plugin-echo"
+description = "Example Snapper upload plugin that returns a file URL"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde_json = "1"

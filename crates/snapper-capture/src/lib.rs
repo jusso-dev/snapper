@@ -4,6 +4,7 @@
 //! On Linux, a set `WAYLAND_DISPLAY` selects the XDG portal capturer unless
 //! `SNAPPER_FORCE_X11` is set. See `docs/platforms/linux-wayland.md`.
 
+pub mod scroll;
 mod stitch;
 mod wayland_backend;
 mod xcap_backend;
@@ -91,6 +92,53 @@ fn rect_contains(rect: &Rect, x: i32, y: i32) -> bool {
     let x = i64::from(x);
     let y = i64::from(y);
     x >= left && y >= top && x < right && y < bottom
+}
+
+/// Crop `rect` from an image whose origin is the image's top-left pixel.
+///
+/// Coordinates outside the image are clipped. The crop is empty when the
+/// rectangle misses the image entirely.
+pub fn crop(image: &Image, rect: Rect) -> Result<Image, CaptureError> {
+    if image.width == 0 || image.height == 0 {
+        return Err(CaptureError::Backend("image has no pixels".to_owned()));
+    }
+    let x0 = rect.x.max(0).min(image.width as i32) as u32;
+    let y0 = rect.y.max(0).min(image.height as i32) as u32;
+    let x1 = rect
+        .x
+        .saturating_add(rect.width as i32)
+        .max(0)
+        .min(image.width as i32) as u32;
+    let y1 = rect
+        .y
+        .saturating_add(rect.height as i32)
+        .max(0)
+        .min(image.height as i32) as u32;
+    if x1 <= x0 || y1 <= y0 {
+        return Err(CaptureError::Backend(
+            "the region is outside the screenshot".to_owned(),
+        ));
+    }
+    let out_w = x1 - x0;
+    let out_h = y1 - y0;
+    let mut rgba = vec![0u8; (out_w * out_h * 4) as usize];
+    for row in 0..out_h {
+        let src = (((y0 + row) * image.width + x0) * 4) as usize;
+        let dst = (row * out_w * 4) as usize;
+        let len = (out_w * 4) as usize;
+        let Some(source) = image.rgba.get(src..src + len) else {
+            return Err(CaptureError::Backend(
+                "the region is outside the screenshot".to_owned(),
+            ));
+        };
+        rgba[dst..dst + len].copy_from_slice(source);
+    }
+    Ok(Image {
+        width: out_w,
+        height: out_h,
+        scale_factor: image.scale_factor,
+        rgba,
+    })
 }
 
 /// Backend selected for this process.

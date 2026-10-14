@@ -48,10 +48,27 @@ pub fn perform(request: OutputRequest, doc: &Document, settings: &Settings) -> E
             saved_note(&result)
         }
         OutputRequest::Upload => {
-            tracing::info!("upload is not available yet");
-            EditorOutput {
-                note: "Upload is not available yet".to_owned(),
-                saved: false,
+            let Some(target) = settings.uploads.first() else {
+                return EditorOutput {
+                    note: "No upload target is configured".to_owned(),
+                    saved: false,
+                };
+            };
+            let steps = vec![
+                crate::output::OutputStep::Save,
+                crate::output::OutputStep::Upload(target.id().to_owned()),
+                crate::output::OutputStep::CopyLink(snapper_core::settings::LinkFormat::Plain),
+                crate::output::OutputStep::Notify,
+            ];
+            let ctx = output::context_for(&image);
+            let result = output::run_with(&steps, &image, &ctx, settings);
+            if let Some(url) = &result.url {
+                EditorOutput {
+                    note: format!("Uploaded {url}"),
+                    saved: result.saved.is_some(),
+                }
+            } else {
+                saved_note(&result)
             }
         }
     }

@@ -97,6 +97,9 @@ pub struct Item {
     pub id: u64,
     pub shape: Shape,
     pub style: Style,
+    /// Set when automatic redaction inserted the item, so the editor can review it.
+    #[serde(default)]
+    pub auto: bool,
 }
 
 /// One undoable change. `apply` performs it; `undo` performs the inverse.
@@ -402,6 +405,7 @@ mod tests {
                 to: Point { x: 4.0, y: 0.0 },
             },
             style: Style::default(),
+            auto: false,
         }
     }
 
@@ -481,6 +485,7 @@ mod tests {
                 n: 1,
             },
             style: Style::default(),
+            auto: false,
         }));
         doc.apply(Edit::Add(Item {
             id: 2,
@@ -489,6 +494,7 @@ mod tests {
                 n: 3,
             },
             style: Style::default(),
+            auto: false,
         }));
         doc.apply(Edit::Add(line(4)));
         assert_eq!(doc.next_step_number(), 4);
@@ -508,6 +514,7 @@ mod tests {
                 },
             },
             style: Style::default(),
+            auto: false,
         });
         doc.items.push(Item {
             id: 2,
@@ -520,6 +527,7 @@ mod tests {
                 },
             },
             style: Style::default(),
+            auto: false,
         });
         doc.items.push(Item {
             id: 3,
@@ -529,6 +537,7 @@ mod tests {
                 size: 4.0,
             },
             style: Style::default(),
+            auto: false,
         });
         assert_eq!(doc.hit_test(Point { x: 1.0, y: 1.0 }), Some(3));
         assert_eq!(doc.hit_test(Point { x: 5.0, y: 5.0 }), Some(2));
@@ -541,6 +550,7 @@ mod tests {
                 n: 1,
             },
             style: Style::default(),
+            auto: false,
         });
         assert_eq!(doc.hit_test(Point { x: 1.0, y: 1.0 }), Some(4));
     }

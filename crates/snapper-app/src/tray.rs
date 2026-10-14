@@ -17,6 +17,10 @@ pub enum Action {
     CaptureFull,
     CaptureLastRegion,
     Record,
+    Ocr,
+    ScrollCapture,
+    /// Index into [`snapper_core::Settings::workflows`].
+    Workflow(u16),
     OpenFolder,
     Settings,
     Quit,
@@ -30,6 +34,9 @@ impl Action {
             Self::CaptureFull => "Capture full screen",
             Self::CaptureLastRegion => "Capture last region",
             Self::Record => "Record",
+            Self::Ocr => "OCR region",
+            Self::ScrollCapture => "Scrolling capture",
+            Self::Workflow(_) => "Workflow",
             Self::OpenFolder => "Open folder",
             Self::Settings => "Settings",
             Self::Quit => "Quit",
@@ -43,6 +50,9 @@ impl Action {
             Self::CaptureFull => "capture-full",
             Self::CaptureLastRegion => return None,
             Self::Record => "record",
+            Self::Ocr => "ocr",
+            Self::ScrollCapture => "scroll-capture",
+            Self::Workflow(_) => return None,
             Self::OpenFolder => "open-folder",
             Self::Settings => "settings",
             Self::Quit => "quit",
@@ -50,28 +60,41 @@ impl Action {
     }
 }
 
-const MENU_ACTIONS: [Action; 7] = [
+const MENU_ACTIONS: [Action; 9] = [
     Action::CaptureRegion,
     Action::CaptureWindow,
     Action::CaptureFull,
     Action::Record,
+    Action::Ocr,
+    Action::ScrollCapture,
     Action::OpenFolder,
     Action::Settings,
     Action::Quit,
 ];
 
 pub fn action_from_id(id: &str) -> Option<Action> {
+    if let Some(rest) = id.strip_prefix("workflow-") {
+        let index = rest.parse().ok()?;
+        return Some(Action::Workflow(index));
+    }
     MENU_ACTIONS
         .into_iter()
         .find(|action| action.menu_id() == Some(id))
 }
 
 /// Build the tray icon. Call this on the thread that runs the event loop.
-pub fn build() -> Result<TrayIcon, String> {
+pub fn build(settings: &snapper_core::Settings) -> Result<TrayIcon, String> {
     let menu = Menu::new();
     for action in MENU_ACTIONS {
         let id = action.menu_id().expect("tray action has an id");
         let item = MenuItem::with_id(id, action.label(), true, None);
+        menu.append(&item).map_err(|err| err.to_string())?;
+    }
+    for (index, workflow) in settings.workflows.iter().enumerate() {
+        let Ok(index) = u16::try_from(index) else {
+            break;
+        };
+        let item = MenuItem::with_id(format!("workflow-{index}"), &workflow.name, true, None);
         menu.append(&item).map_err(|err| err.to_string())?;
     }
     let icon = Icon::from_rgba(icon_rgba(), 32, 32).map_err(|err| err.to_string())?;

@@ -5,5 +5,7 @@
 	<!-- Packaging merges this into the app bundle. A cargo run binary is not a bundle, so it still has a Dock icon. -->
 	<key>LSUIElement</key>
 	<true/>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>Snapper captures the screen when you take a screenshot, scroll a page, or record a region.</string>
 </dict>
 </plist>

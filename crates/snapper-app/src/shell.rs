@@ -10,7 +10,7 @@ use std::cell::RefCell;
 use std::sync::{mpsc, Arc, Mutex};
 
 use egui::{ViewportBuilder, ViewportCommand};
-use snapper_core::settings::HotkeySettings;
+use snapper_core::Settings;
 
 use crate::dispatch::{command_from_args, Command};
 use crate::hotkeys::{self, HotkeyService};
@@ -34,12 +34,12 @@ thread_local! {
 ///
 /// `Ok(None)` means the window closed without an action (treat as quit).
 pub fn run(
-    hotkeys: &HotkeySettings,
+    settings: &Settings,
     ipc: &Arc<Mutex<mpsc::Receiver<Vec<String>>>>,
 ) -> Result<Option<Command>, String> {
     let (tx, rx) = mpsc::channel();
     let ipc = Arc::clone(ipc);
-    let hotkeys = hotkeys.clone();
+    let settings = settings.clone();
     let viewport = ViewportBuilder::default()
         .with_title("Snapper")
         .with_inner_size([1.0, 1.0])
@@ -57,7 +57,7 @@ pub fn run(
         "Snapper",
         options,
         Box::new(move |_cc| {
-            install(&hotkeys)?;
+            install(&settings)?;
             Ok(Box::new(Shell {
                 ipc,
                 outcome: tx,
@@ -71,7 +71,7 @@ pub fn run(
     Ok(rx.try_recv().ok())
 }
 
-fn install(hotkeys: &HotkeySettings) -> Result<(), String> {
+fn install(settings: &Settings) -> Result<(), String> {
     let (has_resident, has_hotkeys) = RESIDENT.with(|slot| {
         let resident = slot.borrow();
         let has_hotkeys = resident
@@ -85,11 +85,11 @@ fn install(hotkeys: &HotkeySettings) -> Result<(), String> {
     }
     // The tray is up but a settings save failed to register the new chords.
     if has_resident {
-        return reregister(hotkeys);
+        return reregister(settings);
     }
-    let (service, conflicts) = HotkeyService::register(hotkeys)?;
+    let (service, conflicts) = HotkeyService::register(settings)?;
     notify_conflicts(&conflicts);
-    let tray = tray::build()?;
+    let tray = tray::build(settings)?;
     RESIDENT.with(|slot| {
         *slot.borrow_mut() = Some(Resident {
             _tray: tray,
@@ -104,7 +104,7 @@ fn install(hotkeys: &HotkeySettings) -> Result<(), String> {
 /// Does nothing when the tray has not been created yet. The next shell start
 /// registers whatever is in settings. When the tray is already up, the previous
 /// [`HotkeyService`] is dropped before the new chords are registered.
-pub fn reregister(hotkeys: &HotkeySettings) -> Result<(), String> {
+pub fn reregister(settings: &Settings) -> Result<(), String> {
     let ready = RESIDENT.with(|slot| slot.borrow().is_some());
     if !ready {
         return Ok(());
@@ -115,11 +115,13 @@ pub fn reregister(hotkeys: &HotkeySettings) -> Result<(), String> {
             .and_then(|resident| resident.hotkeys.take())
     });
     drop(previous);
-    let (service, conflicts) = HotkeyService::register(hotkeys)?;
+    let (service, conflicts) = HotkeyService::register(settings)?;
     notify_conflicts(&conflicts);
+    let tray = tray::build(settings)?;
     RESIDENT.with(|slot| {
         if let Some(resident) = slot.borrow_mut().as_mut() {
             resident.hotkeys = Some(service);
+            resident._tray = tray;
         }
     });
     hotkeys::drain_events();

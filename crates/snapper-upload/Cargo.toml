@@ -1,8 +1,25 @@
 [package]
 name = "snapper-upload"
-description = "Upload target plugin interface for Snapper"
+description = "Upload targets for Snapper"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
+snapper-core = { path = "../snapper-core" }
+async-trait = "0.1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "multipart", "json"] }
+rusty-s3 = "0.5"
+keyring = "3"
+tokio = { version = "1", features = ["rt", "time", "macros"] }
+thiserror = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+url = "2"
+chrono = "0.4"
+
+[dev-dependencies]
+wiremock = "0.6"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tempfile = "3"

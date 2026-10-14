@@ -51,6 +51,10 @@ pub struct HotkeySettings {
     pub last_region: String,
     /// Start or stop a recording.
     pub record: String,
+    /// Recognise text in a region.
+    pub ocr: String,
+    /// Capture a scrolling region.
+    pub scroll: String,
 }
 
 impl Default for HotkeySettings {
@@ -61,6 +65,8 @@ impl Default for HotkeySettings {
             full_screen: "Ctrl+PrintScreen".to_owned(),
             last_region: "Shift+PrintScreen".to_owned(),
             record: "Ctrl+Shift+R".to_owned(),
+            ocr: "Ctrl+Shift+O".to_owned(),
+            scroll: "Ctrl+Shift+S".to_owned(),
         }
     }
 }
@@ -81,6 +87,8 @@ pub struct OutputSettings {
     pub open_editor: bool,
     /// JPEG quality from 1 to 100. Ignored for other formats.
     pub jpeg_quality: u8,
+    /// Run OCR and pixelate secrets before the image is copied or saved.
+    pub auto_redact: bool,
 }
 
 impl Default for OutputSettings {
@@ -92,6 +100,142 @@ impl Default for OutputSettings {
             copy_to_clipboard: true,
             open_editor: false,
             jpeg_quality: 90,
+            auto_redact: false,
+        }
+    }
+}
+
+/// How a workflow takes the screenshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureKind {
+    /// Drag a region.
+    Region,
+    /// The window under the pointer.
+    Window,
+    /// The primary monitor, or the virtual desktop when there is no primary.
+    FullScreen,
+    /// One monitor id from `snapper-cli list monitors`.
+    Monitor { id: u32 },
+}
+
+/// How an uploaded URL is written to the clipboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkFormat {
+    /// The URL on its own.
+    Plain,
+    /// `![name](url)`.
+    #[default]
+    Markdown,
+    /// An `<img>` tag.
+    Html,
+}
+
+/// One stage a workflow runs after capture.
+///
+/// `upload.target` is the id of an entry in [`Settings::uploads`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "step", rename_all = "snake_case")]
+pub enum PipelineStep {
+    /// OCR the image and pixelate detected secrets.
+    Redact,
+    /// Open the annotation editor before the remaining steps.
+    Annotate,
+    /// Copy the image to the clipboard.
+    Clipboard,
+    /// Save using the output directory and filename template.
+    Save,
+    /// Upload to a configured target.
+    Upload { target: String },
+    /// Copy a link in [`Workflow::link_format`].
+    CopyLink,
+    /// Show a notification.
+    Notify,
+}
+
+/// A named after-capture sequence bound to a hotkey.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Workflow {
+    pub name: String,
+    /// Empty means the workflow is only started from the tray or CLI.
+    pub hotkey: String,
+    pub capture: CaptureKind,
+    pub steps: Vec<PipelineStep>,
+    pub link_format: LinkFormat,
+}
+
+/// An upload destination stored in `config.toml`.
+///
+/// Secret keys, tokens, and `Authorization` header values are not fields of
+/// this enum. They live in the OS keychain under the service name `snapper`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum UploadConfig {
+    /// S3-compatible storage, including AWS S3 and Cloudflare R2.
+    S3 {
+        id: String,
+        endpoint: String,
+        bucket: String,
+        region: String,
+        #[serde(default)]
+        key_prefix: String,
+        public_base_url: String,
+        access_key_id: String,
+    },
+    /// Anonymous Imgur upload. The Client-ID is an application identifier.
+    Imgur { id: String, client_id: String },
+    /// Multipart HTTP upload, including targets imported from `.sxcu` files.
+    Http {
+        id: String,
+        url: String,
+        #[serde(default = "default_http_method")]
+        method: String,
+        #[serde(default = "default_file_field")]
+        file_field: String,
+        /// Header values may be `keyring:<account>` so the secret stays out of this file.
+        #[serde(default)]
+        headers: Vec<HeaderSetting>,
+        /// JSON pointer, such as `/data/link`, to the public URL in the response.
+        #[serde(default)]
+        url_json_pointer: String,
+        #[serde(default)]
+        delete_url_json_pointer: String,
+    },
+    /// External `snapper-plugin-<id>` executable.
+    External {
+        id: String,
+        /// Empty uses `snapper-plugin-<id>` on `PATH` or in the plugins directory.
+        #[serde(default)]
+        command: String,
+        #[serde(default)]
+        config: toml::Table,
+    },
+}
+
+/// One HTTP header. `value` is either a literal or `keyring:<account>`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeaderSetting {
+    pub name: String,
+    pub value: String,
+}
+
+fn default_http_method() -> String {
+    "POST".to_owned()
+}
+
+fn default_file_field() -> String {
+    "file".to_owned()
+}
+
+impl UploadConfig {
+    /// Stable id used by workflows and the keychain account name.
+    pub fn id(&self) -> &str {
+        match self {
+            Self::S3 { id, .. }
+            | Self::Imgur { id, .. }
+            | Self::Http { id, .. }
+            | Self::External { id, .. } => id,
         }
     }
 }
@@ -135,6 +279,16 @@ pub struct Settings {
     /// The settings window applies this when the change is saved. The tray
     /// app also applies it on launch, so a hand-edited file takes effect then.
     pub start_at_login: bool,
+    /// Look for a signed GitHub release. Snapper never installs it unattended.
+    pub check_updates: bool,
+    /// Milliseconds between frames while scrolling a capture.
+    pub scroll_delay_ms: u64,
+    /// Tallest scrolling capture, in physical pixels.
+    pub scroll_max_height: u32,
+    /// Configured upload targets. Secrets are not stored here.
+    pub uploads: Vec<UploadConfig>,
+    /// Named workflows.
+    pub workflows: Vec<Workflow>,
     /// Unknown top-level keys, preserved across save.
     #[serde(flatten)]
     pub extra: toml::Table,
@@ -148,16 +302,29 @@ impl Default for Settings {
             output: OutputSettings::default(),
             editor: EditorSettings::default(),
             start_at_login: false,
+            check_updates: true,
+            scroll_delay_ms: 250,
+            scroll_max_height: 30_000,
+            uploads: Vec::new(),
+            workflows: Vec::new(),
             extra: toml::Table::new(),
         }
     }
 }
 
-/// Absolute path of `config.toml` for this OS user.
+/// Directory for history, plugins, and other data that is not configuration.
 ///
 /// Uses `ProjectDirs` with qualifier `au`, organisation `jusso-dev` and
-/// application `snapper`. Falls back to a relative `config.toml` when the
-/// home directory cannot be resolved.
+/// application `snapper`.
+pub fn data_dir() -> PathBuf {
+    directories::ProjectDirs::from("au", "jusso-dev", "snapper")
+        .map(|dirs| dirs.data_dir().to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// Absolute path of `config.toml` for this OS user.
+///
+/// Falls back to a relative `config.toml` when the home directory cannot be resolved.
 pub fn config_path() -> PathBuf {
     directories::ProjectDirs::from("au", "jusso-dev", "snapper")
         .map(|dirs| dirs.config_dir().join("config.toml"))
@@ -271,6 +438,14 @@ mod tests {
         assert_eq!(round.hotkeys.full_screen, "Ctrl+PrintScreen");
         assert_eq!(round.hotkeys.last_region, "Shift+PrintScreen");
         assert_eq!(round.hotkeys.record, "Ctrl+Shift+R");
+        assert_eq!(round.hotkeys.ocr, "Ctrl+Shift+O");
+        assert_eq!(round.hotkeys.scroll, "Ctrl+Shift+S");
+        assert!(round.check_updates);
+        assert_eq!(round.scroll_delay_ms, 250);
+        assert_eq!(round.scroll_max_height, 30_000);
+        assert!(round.uploads.is_empty());
+        assert!(round.workflows.is_empty());
+        assert!(!round.output.auto_redact);
         assert!(round.output.directory.ends_with("Snapper"));
         assert_eq!(round.output.filename_template, "Snapper_{date}_{time}");
         assert_eq!(round.output.format, ImageFormat::Png);
@@ -372,6 +547,40 @@ mod tests {
         let parsed: Settings = toml::from_str(&text).expect("complete document");
         assert_eq!(parsed, settings);
         assert!(!text.contains("stale"), "{text}");
+    }
+
+    #[test]
+    fn upload_config_round_trip_has_no_secret_field() {
+        let mut settings = Settings::default();
+        settings.uploads.push(UploadConfig::S3 {
+            id: "r2".to_owned(),
+            endpoint: "https://example.r2.cloudflarestorage.com".to_owned(),
+            bucket: "shots".to_owned(),
+            region: "auto".to_owned(),
+            key_prefix: "snap".to_owned(),
+            public_base_url: "https://cdn.example".to_owned(),
+            access_key_id: "AKIAEXAMPLE".to_owned(),
+        });
+        settings.workflows.push(Workflow {
+            name: "Bug report".to_owned(),
+            hotkey: "Ctrl+Shift+B".to_owned(),
+            capture: CaptureKind::Region,
+            steps: vec![
+                PipelineStep::Redact,
+                PipelineStep::Annotate,
+                PipelineStep::Upload {
+                    target: "r2".to_owned(),
+                },
+                PipelineStep::CopyLink,
+            ],
+            link_format: LinkFormat::Markdown,
+        });
+        let text = toml::to_string_pretty(&settings).expect("serialise");
+        assert!(!text.to_ascii_lowercase().contains("secret"), "{text}");
+        assert!(text.contains("AKIAEXAMPLE"), "{text}");
+        let loaded: Settings = toml::from_str(&text).expect("parse");
+        assert_eq!(loaded.uploads, settings.uploads);
+        assert_eq!(loaded.workflows, settings.workflows);
     }
 
     #[test]

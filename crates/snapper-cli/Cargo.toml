@@ -7,3 +7,16 @@ license.workspace = true
 
 [dependencies]
 snapper-core = { path = "../snapper-core" }
+snapper-capture = { path = "../snapper-capture" }
+snapper-ocr = { path = "../snapper-ocr" }
+snapper-record = { path = "../snapper-record" }
+clap = { version = "4", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+arboard = "3"
+chrono = "0.4"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"

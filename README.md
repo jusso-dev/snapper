@@ -2,7 +2,7 @@
 
 A fast, free, cross-platform screenshot and annotation tool written in Rust. Snapper aims to replace Greenshot and ShareX on Windows, macOS and Linux with one memory-safe, single-binary app.
 
-> Status: pre-alpha. The workspace compiles, but features are being built from the [roadmap](#roadmap). See the pinned roadmap issue.
+> Status: alpha. Capture, the annotation editor, the tray, hotkeys, the CLI, scrolling capture, OCR, GIF and MP4 recording, S3, R2, Imgur, custom HTTP uploads, local redaction, plugins, and workflows are implemented. Installers, paid code signing, and live screen-reader passes are documented and not yet verified. See [docs/VALIDATION.md](docs/VALIDATION.md).
 
 ## Vision
 
@@ -28,14 +28,25 @@ Greenshot is loved but Windows-only and slow to change. ShareX is powerful but W
 ```
 crates/
   snapper-core     shared types, settings, filename templates
-  snapper-capture  platform capture backends (xcap, Wayland portal)
+  snapper-capture  platform capture backends (xcap, Wayland portal) and scroll stitching
   snapper-editor   annotation document model and CPU renderer
-  snapper-upload   upload target plugin interface and built-in targets
+  snapper-ocr      platform OCR and local secret detection
+  snapper-record   GIF (gifski) and MP4 (ffmpeg) recording
+  snapper-upload   S3, R2, Imgur, custom HTTP, and external plugins
   snapper-cli      the `snapper-cli` binary
   snapper-app      the egui desktop app, tray and hotkeys
 ```
 
 Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and the ADRs in [docs/adr](docs/adr).
+
+## Guides
+
+- [Capture](docs/guide/capture.md), [editor](docs/guide/editor.md), [command line](docs/guide/cli.md)
+- [Uploads](docs/guide/uploads.md) and [workflows](docs/guide/workflows.md)
+- [Plugins](docs/plugins.md)
+- [Windows](docs/platforms/windows.md), [macOS](docs/platforms/macos.md), [Linux X11](docs/platforms/linux-x11.md), [Linux Wayland](docs/platforms/linux-wayland.md)
+- [Releasing](docs/RELEASING.md) and [accessibility](docs/accessibility.md)
+- [Contributing](CONTRIBUTING.md) and the [code of conduct](CODE_OF_CONDUCT.md)
 
 ## Roadmap
 

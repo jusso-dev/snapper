@@ -4,10 +4,15 @@ mod hotkeys;
 mod login;
 mod output;
 mod overlay;
+mod record_ui;
+mod redact;
+mod scroll_capture;
 mod settings_ui;
 mod shell;
 mod single_instance;
 mod tray;
+mod update;
+mod workflow;
 
 use std::sync::{mpsc, Arc, Mutex};
 
@@ -47,6 +52,15 @@ fn main() {
     if let Err(err) = login::apply(settings.start_at_login) {
         tracing::warn!(error = %err, "could not update start at login");
     }
+    if settings.check_updates {
+        let _ = std::thread::Builder::new()
+            .name("snapper-update".to_owned())
+            .spawn(|| {
+                if let Err(err) = update::check_quiet() {
+                    tracing::debug!(error = %err, "update check failed");
+                }
+            });
+    }
 
     let ipc = spawn_ipc(listener);
 
@@ -76,7 +90,7 @@ fn main() {
     let mut last_region: Option<Rect> = None;
     loop {
         settings = load_settings();
-        match shell::run(&settings.hotkeys, &ipc) {
+        match shell::run(&settings, &ipc) {
             Ok(Some(command)) => {
                 if !perform(command, &settings, &mut last_region) {
                     break;

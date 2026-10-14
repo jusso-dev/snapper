@@ -1,7 +1,4 @@
-//! Clipboard, save, and notification steps.
-//!
-//! Upload targets are a later issue. The [`OutputStep::Upload`] variant is
-//! recognised so a configured name can be queued, then reported as unavailable.
+//! Clipboard, save, upload, redaction, and notification steps.
 
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
@@ -10,16 +7,20 @@ use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::{CompressionType, FilterType, PngEncoder};
 use image::codecs::webp::WebPEncoder;
 use image::{ExtendedColorType, ImageEncoder};
-use snapper_core::settings::{ImageFormat, OutputSettings};
+use snapper_core::settings::{ImageFormat, LinkFormat, OutputSettings};
 use snapper_core::template::{self, TemplateContext};
 use snapper_core::{Image, Settings};
 
 /// One stage of the output pipeline.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OutputStep {
+    /// OCR the image and pixelate detected secrets before later steps.
+    Redact,
     Clipboard,
     Save,
     Upload(String),
+    /// Copy the upload URL. The image file is left in place.
+    CopyLink(LinkFormat),
     Notify,
 }
 
@@ -37,12 +38,15 @@ pub struct OutputPipeline {
 }
 
 impl OutputPipeline {
-    /// Clipboard (when enabled), then save, then an optional upload, then notify.
+    /// Redact (when enabled), clipboard (when enabled), save, an optional upload, then notify.
     ///
-    /// `upload` is the target name. Performing the upload is a later issue;
-    /// until then the step reports that the target is not available.
+    /// `upload` is the target id. A target that is not configured fails that
+    /// step and leaves a file saved by an earlier step on disk.
     pub fn from_settings(settings: &OutputSettings, upload: Option<String>) -> Self {
         let mut steps = Vec::new();
+        if settings.auto_redact {
+            steps.push(OutputStep::Redact);
+        }
         if settings.copy_to_clipboard {
             steps.push(OutputStep::Clipboard);
         }
@@ -75,7 +79,41 @@ pub fn context_for(image: &Image) -> TemplateContext {
 /// and reported, and the later steps still run.
 pub fn run(image: &Image, ctx: &TemplateContext, settings: &Settings) -> OutputResult {
     let pipeline = OutputPipeline::from_settings(&settings.output, None);
-    run_steps(pipeline.steps(), image, ctx, settings, &LiveEffects)
+    run_with(pipeline.steps(), image, ctx, settings)
+}
+
+/// Run `steps` in order. A failed step is logged and notified. Later steps still run.
+pub fn run_with(
+    steps: &[OutputStep],
+    image: &Image,
+    ctx: &TemplateContext,
+    settings: &Settings,
+) -> OutputResult {
+    run_steps(steps, image, ctx, settings, &LiveEffects)
+}
+
+/// Plain, Markdown, or HTML for an uploaded image.
+pub fn format_link(format: LinkFormat, name: &str, url: &str) -> String {
+    match format {
+        LinkFormat::Plain => url.to_owned(),
+        LinkFormat::Markdown => format!("![{}]({url})", markdown_label(name)),
+        LinkFormat::Html => format!(
+            "<img src=\"{}\" alt=\"{}\">",
+            escape_attr(url),
+            escape_attr(name)
+        ),
+    }
+}
+
+fn markdown_label(name: &str) -> String {
+    name.replace(['[', ']'], "")
+}
+
+fn escape_attr(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// Copy `image` to the clipboard.
@@ -102,6 +140,22 @@ trait Effects {
     fn copy(&self, image: &Image) -> Result<(), String>;
     fn notify_saved(&self, path: &Path) -> Result<(), String>;
     fn notify_error(&self, message: &str);
+    fn redact(&self, image: &Image) -> Image {
+        image.clone()
+    }
+    fn upload(
+        &self,
+        target: &str,
+        _bytes: &[u8],
+        _name: &str,
+        _mime: &str,
+        _settings: &Settings,
+    ) -> Result<snapper_upload::UploadResult, String> {
+        Err(format!("upload target {target} is not available yet"))
+    }
+    fn copy_text(&self, text: &str) -> Result<(), String> {
+        copy_text(text)
+    }
 }
 
 struct LiveEffects;
@@ -125,10 +179,47 @@ impl Effects for LiveEffects {
             tracing::warn!(error = %err, "could not show an output error");
         }
     }
+
+    fn redact(&self, image: &Image) -> Image {
+        match crate::redact::recognise_and_apply(image) {
+            Ok(image) => image,
+            Err(err) => {
+                self.notify_error(&format!("redaction skipped: {err}"));
+                image.clone()
+            }
+        }
+    }
+
+    fn upload(
+        &self,
+        target: &str,
+        bytes: &[u8],
+        name: &str,
+        mime: &str,
+        settings: &Settings,
+    ) -> Result<snapper_upload::UploadResult, String> {
+        let config = settings
+            .uploads
+            .iter()
+            .find(|config| config.id() == target)
+            .ok_or_else(|| format!("upload target {target} is not available yet"))?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|err| format!("upload target {target} failed: {err}"))?;
+        runtime
+            .block_on(snapper_upload::upload_with(
+                config,
+                name,
+                bytes.to_vec(),
+                mime,
+                &snapper_upload::Keychain,
+            ))
+            .map_err(|err| format!("upload target {target} failed: {err}"))
+    }
 }
 
 struct Job<'a> {
-    image: &'a Image,
     ctx: &'a TemplateContext,
     settings: &'a Settings,
     effects: &'a dyn Effects,
@@ -142,17 +233,17 @@ fn run_steps(
     effects: &dyn Effects,
 ) -> OutputResult {
     let job = Job {
-        image,
         ctx,
         settings,
         effects,
     };
+    let mut working = image.clone();
     let mut result = OutputResult {
         saved: None,
         url: None,
     };
     for step in steps {
-        if let Err(err) = apply_step(step, &job, &mut result) {
+        if let Err(err) = apply_step(step, &job, &mut working, &mut result) {
             tracing::error!(step = ?step, error = %err, "output step failed");
             effects.notify_error(&err);
         }
@@ -160,15 +251,47 @@ fn run_steps(
     result
 }
 
-fn apply_step(step: &OutputStep, job: &Job<'_>, result: &mut OutputResult) -> Result<(), String> {
+fn apply_step(
+    step: &OutputStep,
+    job: &Job<'_>,
+    image: &mut Image,
+    result: &mut OutputResult,
+) -> Result<(), String> {
     match step {
-        OutputStep::Clipboard => job.effects.copy(job.image),
+        OutputStep::Redact => {
+            *image = job.effects.redact(image);
+            Ok(())
+        }
+        OutputStep::Clipboard => job.effects.copy(image),
         OutputStep::Save => {
-            let path = save_image(job.image, job.ctx, &job.settings.output)?;
+            let path = save_image(image, job.ctx, &job.settings.output)?;
             result.saved = Some(path);
             Ok(())
         }
-        OutputStep::Upload(target) => Err(format!("upload target {target} is not available yet")),
+        OutputStep::Upload(target) => {
+            let bytes = encode_memory(image, &job.settings.output)?;
+            let name = file_name(result, &job.settings.output);
+            let uploaded = job.effects.upload(
+                target,
+                &bytes,
+                &name,
+                mime(job.settings.output.format),
+                job.settings,
+            )?;
+            if let Err(err) = remember_upload(result, &name, &uploaded.url) {
+                tracing::warn!(error = %err, "could not append upload history");
+            }
+            result.url = Some(uploaded.url);
+            Ok(())
+        }
+        OutputStep::CopyLink(format) => {
+            let url = result
+                .url
+                .clone()
+                .ok_or_else(|| "there is no link to copy".to_owned())?;
+            let name = file_name(result, &job.settings.output);
+            job.effects.copy_text(&format_link(*format, &name, &url))
+        }
         OutputStep::Notify => {
             if let Some(path) = &result.saved {
                 job.effects.notify_saved(path)?;
@@ -176,6 +299,91 @@ fn apply_step(step: &OutputStep, job: &Job<'_>, result: &mut OutputResult) -> Re
             Ok(())
         }
     }
+}
+
+fn file_name(result: &OutputResult, settings: &OutputSettings) -> String {
+    result
+        .saved
+        .as_ref()
+        .and_then(|path| path.file_name())
+        .and_then(|name| name.to_str())
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("snap.{}", extension(settings.format)))
+}
+
+fn mime(format: ImageFormat) -> &'static str {
+    match format {
+        ImageFormat::Png => "image/png",
+        ImageFormat::Jpeg => "image/jpeg",
+        ImageFormat::Webp => "image/webp",
+    }
+}
+
+fn remember_upload(result: &OutputResult, name: &str, url: &str) -> Result<(), String> {
+    let path = snapper_core::settings::data_dir().join("history.jsonl");
+    let file = result
+        .saved
+        .as_ref()
+        .map(|saved| saved.display().to_string())
+        .unwrap_or_else(|| name.to_owned());
+    snapper_upload::append_history(
+        &path,
+        &snapper_upload::HistoryEntry {
+            time: chrono::Local::now().to_rfc3339(),
+            file,
+            url: url.to_owned(),
+        },
+    )
+    .map_err(|err| err.to_string())
+}
+
+fn encode_memory(image: &Image, settings: &OutputSettings) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    {
+        let cursor = std::io::Cursor::new(&mut bytes);
+        match settings.format {
+            ImageFormat::Png => {
+                let encoder = PngEncoder::new_with_quality(
+                    cursor,
+                    CompressionType::Fast,
+                    FilterType::Adaptive,
+                );
+                encoder
+                    .write_image(
+                        &image.rgba,
+                        image.width,
+                        image.height,
+                        ExtendedColorType::Rgba8,
+                    )
+                    .map_err(|err| err.to_string())?;
+            }
+            ImageFormat::Jpeg => {
+                let rgb = rgba_to_rgb(&image.rgba);
+                let encoder =
+                    JpegEncoder::new_with_quality(cursor, jpeg_quality(settings.jpeg_quality));
+                encoder
+                    .write_image(&rgb, image.width, image.height, ExtendedColorType::Rgb8)
+                    .map_err(|err| err.to_string())?;
+            }
+            ImageFormat::Webp => {
+                let encoder = WebPEncoder::new_lossless(cursor);
+                encoder
+                    .write_image(
+                        &image.rgba,
+                        image.width,
+                        image.height,
+                        ExtendedColorType::Rgba8,
+                    )
+                    .map_err(|err| err.to_string())?;
+            }
+        }
+    }
+    Ok(bytes)
+}
+
+fn copy_text(text: &str) -> Result<(), String> {
+    let mut clipboard = arboard::Clipboard::new().map_err(|err| err.to_string())?;
+    clipboard.set_text(text).map_err(|err| err.to_string())
 }
 
 /// Render the filename template, sanitise it, and write a unique file.
@@ -563,6 +771,40 @@ mod tests {
         assert!(errors.iter().any(|err| err.contains("s3")));
         assert_eq!(effects.notes.lock().expect("notes").len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn link_formats_escape_the_name_and_url() {
+        assert_eq!(
+            format_link(LinkFormat::Plain, "shot", "https://cdn.example/a.png"),
+            "https://cdn.example/a.png"
+        );
+        assert_eq!(
+            format_link(LinkFormat::Markdown, "a[b]", "https://cdn.example/a.png"),
+            "![ab](https://cdn.example/a.png)"
+        );
+        assert_eq!(
+            format_link(
+                LinkFormat::Html,
+                "a<b>",
+                "https://cdn.example/a.png?q=\"1\""
+            ),
+            "<img src=\"https://cdn.example/a.png?q=&quot;1&quot;\" alt=\"a&lt;b&gt;\">"
+        );
+    }
+
+    #[test]
+    fn auto_redact_is_the_first_step_only_when_enabled() {
+        let mut output = OutputSettings::default();
+        assert!(!output.auto_redact);
+        assert!(!OutputPipeline::from_settings(&output, None)
+            .steps()
+            .contains(&OutputStep::Redact));
+        output.auto_redact = true;
+        assert_eq!(
+            OutputPipeline::from_settings(&output, None).steps()[0],
+            OutputStep::Redact
+        );
     }
 
     #[test]

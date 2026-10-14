@@ -789,6 +789,7 @@ mod tests {
                 radius: 3.0,
             },
             style: Style::default(),
+            auto: false,
         });
         let blurred = flatten(&blurred);
         for y in 2..18 {
@@ -815,6 +816,7 @@ mod tests {
                 block: 4,
             },
             style: Style::default(),
+            auto: false,
         });
         let blocks = flatten(&blocks);
         for y in 0..24 {
@@ -848,6 +850,7 @@ mod tests {
                 },
                 ..Style::default()
             },
+            auto: false,
         });
         doc.items.push(Item {
             id: 2,
@@ -856,6 +859,7 @@ mod tests {
                 n: 4,
             },
             style: Style::default(),
+            auto: false,
         });
         let image = flatten(&doc);
         assert!(

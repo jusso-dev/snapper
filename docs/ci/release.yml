@@ -1,0 +1,77 @@
+# Release recipe. This file is not a live GitHub workflow.
+# Copy it to .github/workflows/release.yml when you are ready to publish.
+# Signing uses secret names only. Do not put certificates or private keys in the repo.
+name: release
+on:
+  push:
+    tags:
+      - "v*"
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            formats: msi,nsis
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            formats: app,dmg
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            formats: app,dmg
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            formats: appimage,deb,rpm
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install Linux packaging tools
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y librsvg2-bin patchelf
+      - name: Install cargo-packager
+        run: cargo install cargo-packager --locked
+      - name: Package
+        run: cargo packager --release -p snapper-app --target ${{ matrix.target }} --formats ${{ matrix.formats }}
+
+      - name: Sign Windows installers
+        if: matrix.os == 'windows-latest'
+        env:
+          WINDOWS_SIGN_TENANT_ID: ${{ secrets.WINDOWS_SIGN_TENANT_ID }}
+          WINDOWS_SIGN_CLIENT_ID: ${{ secrets.WINDOWS_SIGN_CLIENT_ID }}
+          WINDOWS_SIGN_CLIENT_SECRET: ${{ secrets.WINDOWS_SIGN_CLIENT_SECRET }}
+          WINDOWS_SIGN_ACCOUNT: ${{ secrets.WINDOWS_SIGN_ACCOUNT }}
+          WINDOWS_SIGN_PROFILE: ${{ secrets.WINDOWS_SIGN_PROFILE }}
+        run: |
+          echo "Sign each installer with signtool or Azure Trusted Signing."
+          echo "Secret names: WINDOWS_SIGN_TENANT_ID, WINDOWS_SIGN_CLIENT_ID, WINDOWS_SIGN_CLIENT_SECRET, WINDOWS_SIGN_ACCOUNT, WINDOWS_SIGN_PROFILE."
+
+      - name: Sign and notarise macOS
+        if: matrix.os == 'macos-latest'
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER: ${{ secrets.APPLE_NOTARY_ISSUER }}
+        run: |
+          echo "codesign --force --options runtime --timestamp --entitlements crates/snapper-app/entitlements.plist --sign \"$APPLE_SIGNING_IDENTITY\" <app>"
+          echo "xcrun notarytool submit <dmg-or-zip> --key <key> --key-id \"$APPLE_NOTARY_KEY_ID\" --issuer \"$APPLE_NOTARY_ISSUER\" --wait"
+          echo "xcrun stapler staple <app-or-dmg>"
+
+      - name: Sign the update manifest
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          echo "Write latest.json, then: minisign -S -s \"$MINISIGN_SECRET_KEY\" -m latest.json -x latest.json.minisig"
+          echo "The matching public key is compiled into snapper-app. Do not commit the secret key."
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            target/**/release/dist/**
+            latest.json
+            latest.json.minisig

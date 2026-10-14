@@ -33,6 +33,8 @@ pub struct EditorApp {
     fitted: bool,
     reload_texture: bool,
     output_note: String,
+    /// Steps to run when the user saves, instead of the default pipeline.
+    after: Vec<crate::output::OutputStep>,
 }
 
 impl EditorApp {
@@ -55,6 +57,7 @@ impl EditorApp {
             fitted: false,
             reload_texture: true,
             output_note: String::new(),
+            after: Vec::new(),
         }
     }
 
@@ -87,7 +90,14 @@ impl EditorApp {
         if let Some(edit) = self.session.commit_text() {
             self.apply_edit(edit);
         }
-        let done = perform(request, &self.doc, &self.settings);
+        let done = if request == OutputRequest::Save && !self.after.is_empty() {
+            let image = flattened(&self.doc);
+            let ctx = crate::output::context_for(&image);
+            let result = crate::output::run_with(&self.after, &image, &ctx, &self.settings);
+            follow_up_note(&result)
+        } else {
+            perform(request, &self.doc, &self.settings)
+        };
         self.output_note = done.note;
         if done.saved {
             self.dirty = false;
@@ -126,6 +136,15 @@ impl EditorApp {
 }
 
 pub fn run_editor(doc: Document, settings: Settings) {
+    run_editor_after(doc, settings, Vec::new());
+}
+
+/// Open the editor and run `after` when the user saves.
+pub fn run_editor_after(doc: Document, settings: Settings, after: Vec<crate::output::OutputStep>) {
+    launch(doc, settings, after);
+}
+
+fn launch(doc: Document, settings: Settings, after: Vec<crate::output::OutputStep>) {
     let options = eframe::NativeOptions {
         viewport: ViewportBuilder::default()
             .with_title("Snapper editor")
@@ -133,7 +152,8 @@ pub fn run_editor(doc: Document, settings: Settings) {
         persist_window: false,
         ..Default::default()
     };
-    let app = EditorApp::new(doc, settings);
+    let mut app = EditorApp::new(doc, settings);
+    app.after = after;
     if let Err(err) = eframe::run_native(
         "Snapper editor",
         options,
@@ -153,6 +173,7 @@ impl eframe::App for EditorApp {
         }
         self.shortcuts(ctx);
         self.toolbar(ctx);
+        self.review_banner(ctx);
         self.bottom_bar(ctx);
         self.canvas(ctx);
         if self.confirm_close {
@@ -206,10 +227,19 @@ impl EditorApp {
                 {
                     style_changed = true;
                 }
-                if ui.button("Fit").clicked() {
+                ui.label("Stroke colour");
+                if ui
+                    .button("Fit")
+                    .on_hover_text("Fit the image in the window")
+                    .clicked()
+                {
                     fit = true;
                 }
-                if ui.button("100%").clicked() {
+                if ui
+                    .button("100%")
+                    .on_hover_text("Show the image at 100 percent")
+                    .clicked()
+                {
                     actual = true;
                 }
             });
@@ -234,13 +264,17 @@ impl EditorApp {
         let mut request = None;
         egui::TopBottomPanel::bottom("actions").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                if ui.button("Copy").clicked() {
+                if ui.button("Copy").on_hover_text("Copy the image").clicked() {
                     request = Some(OutputRequest::Copy);
                 }
-                if ui.button("Save").clicked() {
+                if ui.button("Save").on_hover_text("Save the image").clicked() {
                     request = Some(OutputRequest::Save);
                 }
-                if ui.button("Upload").clicked() {
+                if ui
+                    .button("Upload")
+                    .on_hover_text("Upload the image")
+                    .clicked()
+                {
                     request = Some(OutputRequest::Upload);
                 }
                 if !self.output_note.is_empty() {
@@ -250,6 +284,36 @@ impl EditorApp {
         });
         if let Some(request) = request {
             self.output(request);
+        }
+    }
+
+    fn review_banner(&mut self, ctx: &egui::Context) {
+        let autos: Vec<Item> = self
+            .session
+            .display_items()
+            .into_iter()
+            .filter(|item| item.auto)
+            .collect();
+        if autos.is_empty() {
+            return;
+        }
+        let mut clear = false;
+        egui::TopBottomPanel::top("review-redactions").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Review redactions");
+                if ui
+                    .button("Remove automatic redactions")
+                    .on_hover_text("Remove every automatic redaction")
+                    .clicked()
+                {
+                    clear = true;
+                }
+            });
+        });
+        if clear {
+            for item in autos {
+                self.apply_edit(Edit::Remove(item));
+            }
         }
     }
 
@@ -417,10 +481,18 @@ impl EditorApp {
             .show(ctx, |ui| {
                 ui.label("Close the editor and discard unsaved annotations?");
                 ui.horizontal(|ui| {
-                    if ui.button("Discard").clicked() {
+                    if ui
+                        .button("Discard")
+                        .on_hover_text("Discard edits")
+                        .clicked()
+                    {
                         discard = true;
                     }
-                    if ui.button("Keep editing").clicked() {
+                    if ui
+                        .button("Keep editing")
+                        .on_hover_text("Keep editing")
+                        .clicked()
+                    {
                         keep = true;
                     }
                 });
@@ -575,6 +647,11 @@ fn paint_item(ui: &egui::Ui, item: &Item, view: View, selected: bool) {
             );
         }
     }
+    if item.auto {
+        if let Some(bounds) = selection_bounds(item) {
+            dashed_rect(ui, bounds, view, Color32::from_rgb(220, 140, 40));
+        }
+    }
     if selected {
         if let Some(bounds) = selection_bounds(item) {
             let drawn = Rect::from_min_max(
@@ -593,6 +670,77 @@ fn paint_item(ui: &egui::Ui, item: &Item, view: View, selected: bool) {
                 Stroke::new(1.0_f32, Color32::from_rgb(80, 160, 255)),
             );
         }
+    }
+}
+
+fn dashed_rect(ui: &egui::Ui, rect: snapper_editor::RectF, view: View, colour: Color32) {
+    let (x, y) = image_to_screen(
+        Point {
+            x: rect.x,
+            y: rect.y,
+        },
+        view,
+    );
+    let (x2, y2) = image_to_screen(
+        Point {
+            x: rect.x + rect.width,
+            y: rect.y + rect.height,
+        },
+        view,
+    );
+    let corners = [
+        Pos2::new(x, y),
+        Pos2::new(x2, y),
+        Pos2::new(x2, y2),
+        Pos2::new(x, y2),
+    ];
+    let stroke = Stroke::new(1.5, colour);
+    for index in 0..4 {
+        dash_line(ui, corners[index], corners[(index + 1) % 4], stroke);
+    }
+}
+
+fn dash_line(ui: &egui::Ui, from: Pos2, to: Pos2, stroke: Stroke) {
+    let delta = to - from;
+    let length = delta.length();
+    if length < 1.0 {
+        return;
+    }
+    let step = 8.0_f32;
+    let mut travelled = 0.0;
+    let mut draw = true;
+    while travelled < length {
+        let next = (travelled + step).min(length);
+        if draw {
+            let start = from + delta * (travelled / length);
+            let end = from + delta * (next / length);
+            ui.painter().line_segment([start, end], stroke);
+        }
+        travelled = next;
+        draw = !draw;
+    }
+}
+
+fn follow_up_note(result: &crate::output::OutputResult) -> output::EditorOutput {
+    if let Some(path) = &result.saved {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("screenshot");
+        return output::EditorOutput {
+            note: format!("Saved {name}"),
+            saved: true,
+        };
+    }
+    if let Some(url) = &result.url {
+        return output::EditorOutput {
+            note: format!("Uploaded {url}"),
+            saved: true,
+        };
+    }
+    output::EditorOutput {
+        note: "Not saved".to_owned(),
+        saved: false,
     }
 }
 
@@ -697,6 +845,7 @@ mod preview_tests {
                 },
             },
             style: Style::default(),
+            auto: false,
         });
         let (_, _, rgba) = preview_bytes(&doc);
         assert_eq!(rgba, base.rgba);
@@ -713,6 +862,7 @@ mod preview_tests {
                 block: 4,
             },
             style: Style::default(),
+            auto: false,
         });
         let (_, _, rgba) = preview_bytes(&doc);
         assert_ne!(rgba, base.rgba);

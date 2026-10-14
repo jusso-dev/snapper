@@ -38,6 +38,7 @@ fn scene() -> Document {
                 shadow: true,
                 fill: None,
             },
+            auto: false,
         },
         Item {
             id: 2,
@@ -55,6 +56,7 @@ fn scene() -> Document {
                 width: 3.0,
                 ..Style::default()
             },
+            auto: false,
         },
         Item {
             id: 3,
@@ -82,6 +84,7 @@ fn scene() -> Document {
                 width: 2.0,
                 shadow: false,
             },
+            auto: false,
         },
         Item {
             id: 4,
@@ -109,6 +112,7 @@ fn scene() -> Document {
                 width: 2.0,
                 shadow: false,
             },
+            auto: false,
         },
         Item {
             id: 5,
@@ -129,6 +133,7 @@ fn scene() -> Document {
                 },
                 ..Style::default()
             },
+            auto: false,
         },
         Item {
             id: 6,
@@ -147,6 +152,7 @@ fn scene() -> Document {
                 width: 1.0,
                 ..Style::default()
             },
+            auto: false,
         },
         Item {
             id: 7,
@@ -155,6 +161,7 @@ fn scene() -> Document {
                 n: 1,
             },
             style: Style::default(),
+            auto: false,
         },
     ];
     doc

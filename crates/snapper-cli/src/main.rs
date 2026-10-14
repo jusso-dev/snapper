@@ -13,5 +13,6 @@ fn main() {
         panic!("SNAPPER_TEST_PANIC");
     }
 
-    println!("snapper-cli {} (skeleton)", env!("CARGO_PKG_VERSION"));
+    let code = snapper_cli::run_from_env();
+    std::process::exit(code);
 }

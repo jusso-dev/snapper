@@ -47,7 +47,17 @@ pub fn perform(action: Action, settings: &Settings, last_region: &mut Option<Rec
         Action::CaptureWindow => capture_region(settings, last_region),
         Action::CaptureFull => capture_full(settings),
         Action::CaptureLastRegion => capture_last(settings, last_region),
-        Action::Record => output::notify("Snapper", "recording is not available yet"),
+        Action::Record => crate::record_ui::run(settings),
+        Action::Ocr => ocr_region(last_region),
+        Action::ScrollCapture => match crate::scroll_capture::run(settings) {
+            Ok(Some(image)) => deliver(image, settings),
+            Ok(None) => {}
+            Err(err) => output::notify("Snapper", &err),
+        },
+        Action::Workflow(index) => match settings.workflows.get(index as usize) {
+            Some(workflow) => crate::workflow::run(workflow, settings, last_region),
+            None => output::notify("Snapper", "that workflow is no longer in settings"),
+        },
         Action::OpenFolder => open_folder(settings),
         Action::Settings => crate::settings_ui::run(settings.clone()),
         Action::Quit => return false,
@@ -152,13 +162,100 @@ fn capture_last(settings: &Settings, last_region: &Option<Rect>) {
     }
 }
 
+fn ocr_region(last_region: &mut Option<Rect>) {
+    let capturer = default_capturer();
+    let monitors = match capturer.monitors() {
+        Ok(monitors) if !monitors.is_empty() => monitors,
+        Ok(_) => {
+            output::notify("Snapper", "capture failed: no monitors found");
+            return;
+        }
+        Err(err) => {
+            notify_capture(err);
+            return;
+        }
+    };
+    let windows = match capturer.windows() {
+        Ok(windows) => windows,
+        Err(CaptureError::Unsupported(_)) => Vec::new(),
+        Err(err) => {
+            notify_capture(err);
+            return;
+        }
+    };
+    let frozen = match capturer.capture_all() {
+        Ok(image) => image,
+        Err(err) => {
+            notify_capture(err);
+            return;
+        }
+    };
+    let source = clone_image(&frozen);
+    let origin = desktop_origin(&monitors);
+    let rect = match overlay::run_overlay(frozen, monitors, windows) {
+        OverlayResult::Region(rect) => {
+            *last_region = Some(rect);
+            rect
+        }
+        OverlayResult::Window(_) | OverlayResult::Cancelled => return,
+    };
+    let image = match crop_desktop(&source, rect, origin.0, origin.1) {
+        Ok(image) => image,
+        Err(err) => {
+            output::notify("Snapper", &err);
+            return;
+        }
+    };
+    let engine = match snapper_ocr::default_engine() {
+        Ok(engine) => engine,
+        Err(err) => {
+            output::notify("Snapper", &err.to_string());
+            return;
+        }
+    };
+    let words = match engine.recognise(&image, "en") {
+        Ok(words) => words,
+        Err(err) => {
+            output::notify("Snapper", &format!("ocr failed: {err}"));
+            return;
+        }
+    };
+    let text = snapper_ocr::join_lines(&words);
+    if text.trim().is_empty() {
+        output::notify("Snapper", "no text was recognised");
+        return;
+    }
+    if let Err(err) = copy_ocr_text(&text) {
+        output::notify("Snapper", &format!("could not copy the text: {err}"));
+        return;
+    }
+    output::notify("Snapper", "recognised text was copied");
+}
+
+fn copy_ocr_text(text: &str) -> Result<(), String> {
+    let mut clipboard = arboard::Clipboard::new().map_err(|err| err.to_string())?;
+    clipboard.set_text(text).map_err(|err| err.to_string())
+}
+
 fn deliver(image: Image, settings: &Settings) {
     if image.width == 0 || image.height == 0 {
         output::notify("Snapper", "the capture was empty");
         return;
     }
     if settings.output.open_editor {
-        editor::run_editor(Document::new(image), settings.clone());
+        let mut doc = Document::new(image);
+        if settings.output.auto_redact {
+            match snapper_ocr::default_engine().and_then(|engine| engine.recognise(&doc.base, "en"))
+            {
+                Ok(words) => {
+                    for item in crate::redact::items_for(&words, 1) {
+                        doc.apply(snapper_editor::Edit::Add(item));
+                    }
+                }
+                Err(err) => output::notify("Snapper", &format!("redaction skipped: {err}")),
+            }
+        }
+        editor::run_editor(doc, settings.clone());
         return;
     }
     let ctx = output::context_for(&image);
