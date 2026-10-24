@@ -613,7 +613,7 @@ fn uploads_tab(ui: &mut egui::Ui, settings: &mut Settings, change: &mut FieldCha
         settings
             .uploads
             .push(snapper_core::settings::UploadConfig::S3 {
-                id: format!("s3-{}", settings.uploads.len() + 1),
+                id: new_upload_id(settings, "s3"),
                 endpoint: "https://example.r2.cloudflarestorage.com".to_owned(),
                 bucket: "shots".to_owned(),
                 region: "auto".to_owned(),
@@ -627,7 +627,7 @@ fn uploads_tab(ui: &mut egui::Ui, settings: &mut Settings, change: &mut FieldCha
         settings
             .uploads
             .push(snapper_core::settings::UploadConfig::Imgur {
-                id: format!("imgur-{}", settings.uploads.len() + 1),
+                id: new_upload_id(settings, "imgur"),
                 client_id: String::new(),
             });
         change.edited = true;
@@ -650,7 +650,16 @@ fn uploads_tab(ui: &mut egui::Ui, settings: &mut Settings, change: &mut FieldCha
             .data_mut(|data| data.insert_temp(egui::Id::new("sxcu-path"), path.clone()));
     }
     if ui.button("Import .sxcu").clicked() {
-        match snapper_upload::import_sxcu(std::path::Path::new(&path), &snapper_upload::Keychain) {
+        let taken = settings
+            .uploads
+            .iter()
+            .map(|upload| upload.id())
+            .collect::<Vec<_>>();
+        match snapper_upload::import_sxcu(
+            std::path::Path::new(&path),
+            &snapper_upload::Keychain,
+            &taken,
+        ) {
             Ok(config) => {
                 settings.uploads.push(config);
                 change.edited = true;
@@ -682,7 +691,7 @@ fn uploads_tab(ui: &mut egui::Ui, settings: &mut Settings, change: &mut FieldCha
                 settings
                     .uploads
                     .push(snapper_core::settings::UploadConfig::External {
-                        id: plugin.id.clone(),
+                        id: new_upload_id(settings, &plugin.id),
                         command: plugin.path.display().to_string(),
                         config: toml::Table::new(),
                     });
@@ -693,6 +702,15 @@ fn uploads_tab(ui: &mut egui::Ui, settings: &mut Settings, change: &mut FieldCha
             ui.label(note);
         }
     }
+}
+
+fn new_upload_id(settings: &Settings, base: &str) -> String {
+    let taken = settings
+        .uploads
+        .iter()
+        .map(|upload| upload.id())
+        .collect::<Vec<_>>();
+    snapper_upload::unique_id(base, &taken)
 }
 
 fn upload_kind(upload: &snapper_core::settings::UploadConfig) -> &'static str {
@@ -738,7 +756,8 @@ fn edit_upload_fields(ui: &mut egui::Ui, settings: &mut Settings, change: &mut F
                 url_json_pointer,
                 ..
             } => {
-                text_row(ui, "Id", id, change);
+                // Keychain headers are tied to http:<id>:, so the id is fixed.
+                ui.label(format!("Id {id}"));
                 text_row(ui, "URL", url, change);
                 text_row(ui, "Method", method, change);
                 text_row(ui, "File field", file_field, change);

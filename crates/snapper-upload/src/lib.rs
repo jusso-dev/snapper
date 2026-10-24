@@ -16,7 +16,7 @@ mod sxcu;
 pub use external::{discover, discover_in, run_plugin, DiscoveredPlugin, ExternalTarget};
 pub use history::{append_history, HistoryEntry};
 pub use secrets::{Keychain, MemorySecretStore, SecretStore};
-pub use sxcu::import_sxcu;
+pub use sxcu::{import_sxcu, unique_id};
 
 use async_trait::async_trait;
 use snapper_core::settings::UploadConfig;
@@ -153,7 +153,12 @@ fn toml_to_json(value: &toml::Value) -> serde_json::Value {
 }
 
 pub(crate) fn http_client() -> Result<reqwest::Client, UploadError> {
+    // Redirects are not followed: custom headers can carry keychain secrets,
+    // and reqwest only strips `Authorization` and `Cookie` on a cross-host hop.
     reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(120))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|err| UploadError::Network(err.to_string()))
 }
@@ -171,12 +176,21 @@ pub fn object_key(prefix: &str, name: &str) -> String {
     }
 }
 
-/// `{base}/{key}` without a double slash.
+/// `{base}/{key}` without a double slash. Each key segment is percent-encoded.
 pub fn public_url(base: &str, key: &str) -> String {
     let base = base.trim_end_matches('/');
-    let key = key.trim_start_matches('/');
+    let key = key
+        .trim_start_matches('/')
+        .split('/')
+        .map(|segment| {
+            url::form_urlencoded::byte_serialize(segment.as_bytes())
+                .collect::<String>()
+                .replace('+', "%20")
+        })
+        .collect::<Vec<_>>()
+        .join("/");
     if base.is_empty() {
-        key.to_owned()
+        key
     } else {
         format!("{base}/{key}")
     }

@@ -32,7 +32,11 @@ pub enum OverlayResult {
 pub enum OverlayMode {
     Hover,
     Dragging,
-    Resizing(ResizeHandle),
+    /// Resizing from the selection as it was at press time.
+    Resizing(ResizeHandle, Rect),
+    /// Pressed inside the selection at this physical point. A click keeps the
+    /// selection; moving past the click slop starts a new drag from here.
+    PressedInside(i32, i32),
 }
 
 /// Shared state for every monitor viewport.
@@ -95,7 +99,11 @@ impl OverlayState {
         if let Some(rect) = self.selection() {
             let tolerance = self.handle_tolerance(monitor_index);
             if let Some(handle) = hit_resize_handle(rect, x, y, tolerance) {
-                self.mode = OverlayMode::Resizing(handle);
+                self.mode = OverlayMode::Resizing(handle, rect);
+                return;
+            }
+            if rect_contains(rect, x, y) {
+                self.mode = OverlayMode::PressedInside(x, y);
                 return;
             }
         }
@@ -117,10 +125,15 @@ impl OverlayState {
                     self.drag = Some((start, Pos2::new(x as f32, y as f32)));
                 }
             }
-            OverlayMode::Resizing(handle) => {
-                if let Some(rect) = self.selection() {
-                    let resized = self.clamp(resize_rect(rect, handle, x, y));
-                    self.drag = Some(corners(resized));
+            OverlayMode::Resizing(handle, anchor) => {
+                let resized = self.clamp(resize_rect(anchor, handle, x, y));
+                self.drag = Some(corners(resized));
+            }
+            OverlayMode::PressedInside(sx, sy) => {
+                if (x - sx).abs().max((y - sy).abs()) > CLICK_SLOP_PX {
+                    let start = Pos2::new(sx as f32, sy as f32);
+                    self.drag = Some((start, Pos2::new(x as f32, y as f32)));
+                    self.mode = OverlayMode::Dragging;
                 }
             }
             OverlayMode::Hover => {}
@@ -150,12 +163,11 @@ impl OverlayState {
                     }
                 }
             }
-            OverlayMode::Resizing(handle) => {
-                if let Some(rect) = self.selection() {
-                    self.drag = Some(corners(self.clamp(resize_rect(rect, handle, x, y))));
-                }
+            OverlayMode::Resizing(handle, anchor) => {
+                self.drag = Some(corners(self.clamp(resize_rect(anchor, handle, x, y))));
             }
-            OverlayMode::Hover => {}
+            // A click inside the selection keeps it, so a double-click confirms it.
+            OverlayMode::PressedInside(..) | OverlayMode::Hover => {}
         }
         self.mode = OverlayMode::Hover;
     }
@@ -164,6 +176,7 @@ impl OverlayState {
         if self.result.is_some() {
             return;
         }
+        self.mode = OverlayMode::Hover;
         if let Some(rect) = self.selection() {
             self.result = Some(OverlayResult::Region(rect));
             return;
@@ -244,6 +257,12 @@ impl OverlayState {
 
 fn pos_i32(pos: Pos2) -> (i32, i32) {
     (pos.x.round() as i32, pos.y.round() as i32)
+}
+
+fn rect_contains(rect: Rect, x: i32, y: i32) -> bool {
+    let (x, y) = (i64::from(x), i64::from(y));
+    let (left, top) = (i64::from(rect.x), i64::from(rect.y));
+    x >= left && y >= top && x < left + i64::from(rect.width) && y < top + i64::from(rect.height)
 }
 
 fn corners(rect: Rect) -> (Pos2, Pos2) {
@@ -392,5 +411,62 @@ mod tests {
         overlay.pointer_down(0, 40.0, 40.0);
         overlay.pointer_moved(0, 60.0, 50.0);
         assert_eq!(overlay.highlight_window(0, 12.0, 12.0), None);
+    }
+
+    fn select(overlay: &mut OverlayState, from: (f32, f32), to: (f32, f32)) {
+        overlay.pointer_down(0, from.0, from.1);
+        overlay.pointer_moved(0, to.0, to.1);
+        overlay.pointer_up(0, to.0, to.1);
+    }
+
+    #[test]
+    fn click_inside_the_selection_keeps_it_for_double_click_confirm() {
+        let mut overlay = state();
+        select(&mut overlay, (4.0, 4.0), (60.0, 50.0));
+        let selected = overlay.selection().expect("selection");
+        // First click of a double-click lands on window 7, inside the selection.
+        overlay.pointer_down(0, 20.0, 20.0);
+        overlay.pointer_up(0, 20.0, 20.0);
+        assert_eq!(overlay.result(), None);
+        assert_eq!(overlay.selection(), Some(selected));
+        overlay.pointer_down(0, 20.0, 20.0);
+        overlay.double_click(0, 20.0, 20.0);
+        assert_eq!(overlay.result(), Some(&OverlayResult::Region(selected)));
+    }
+
+    #[test]
+    fn drag_from_inside_the_selection_starts_a_new_one() {
+        let mut overlay = state();
+        select(&mut overlay, (4.0, 4.0), (60.0, 50.0));
+        select(&mut overlay, (20.0, 20.0), (40.0, 30.0));
+        assert_eq!(
+            overlay.selection(),
+            Some(Rect {
+                x: 20,
+                y: 20,
+                width: 20,
+                height: 10,
+            })
+        );
+    }
+
+    #[test]
+    fn resize_past_the_opposite_edge_flips_from_the_press_time_rect() {
+        let mut overlay = state();
+        select(&mut overlay, (20.0, 20.0), (40.0, 40.0));
+        // Grab the south-east corner and drag past the north-west one.
+        overlay.pointer_down(0, 40.0, 40.0);
+        overlay.pointer_moved(0, 20.0, 20.0);
+        overlay.pointer_moved(0, 10.0, 12.0);
+        overlay.pointer_up(0, 10.0, 12.0);
+        assert_eq!(
+            overlay.selection(),
+            Some(Rect {
+                x: 10,
+                y: 12,
+                width: 10,
+                height: 8,
+            })
+        );
     }
 }

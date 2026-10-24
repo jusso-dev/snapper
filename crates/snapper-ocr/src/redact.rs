@@ -135,10 +135,14 @@ fn ipv4(text: &str) -> bool {
     .is_match(text)
 }
 
+/// Card numbers start with 2 to 6 (Mastercard, Amex, Visa, Discover). This
+/// keeps millisecond timestamps and other long ids from passing on Luhn alone.
 fn card(text: &str) -> bool {
-    digit_groups(text)
-        .into_iter()
-        .any(|digits| (13..=19).contains(&digits.len()) && luhn(&digits))
+    digit_groups(text).into_iter().any(|digits| {
+        (13..=19).contains(&digits.len())
+            && digits.starts_with(['2', '3', '4', '5', '6'])
+            && luhn(&digits)
+    })
 }
 
 fn tfn(text: &str) -> bool {
@@ -237,7 +241,7 @@ fn luhn(number: &str) -> bool {
 /// Australian tax file number. Weights `[1, 4, 3, 7, 5, 8, 6, 9, 10]`, mod 11.
 fn tfn_check(digits: &[u8]) -> bool {
     const WEIGHTS: [u32; 9] = [1, 4, 3, 7, 5, 8, 6, 9, 10];
-    if digits.len() != 9 {
+    if digits.len() != 9 || digits.iter().all(|digit| *digit == b'0') {
         return false;
     }
     let mut sum = 0u32;
@@ -255,11 +259,12 @@ fn tfn_check(digits: &[u8]) -> bool {
 
 /// Medicare card number. The first eight digits use weights
 /// `[1, 3, 7, 9, 1, 3, 7, 9]`. The ninth digit is the check digit (mod 10).
-/// The tenth digit is the individual reference number.
+/// The tenth digit is the individual reference number. The first digit is 2
+/// to 6, which also rules out Australian mobile numbers (`04...`).
 fn medicare_check(digits: &str) -> bool {
     const WEIGHTS: [u32; 8] = [1, 3, 7, 9, 1, 3, 7, 9];
     let values: Vec<u32> = digits.chars().filter_map(|ch| ch.to_digit(10)).collect();
-    if values.len() != 10 || values[9] == 0 {
+    if values.len() != 10 || !(2..=6).contains(&values[0]) || values[9] == 0 {
         return false;
     }
     let sum: u32 = values
@@ -294,9 +299,16 @@ pub fn shannon_entropy(text: &str) -> f32 {
     entropy
 }
 
+/// OCR engines return whole lines, so each space-separated token is checked on
+/// its own. A token needs letters and digits, and a URL does not count.
 fn is_high_entropy(text: &str) -> bool {
-    let compact: String = text.chars().filter(|ch| !ch.is_whitespace()).collect();
-    compact.chars().count() >= 20 && shannon_entropy(&compact) >= 4.0
+    text.split_whitespace().any(|token| {
+        token.chars().count() >= 20
+            && token.chars().any(|ch| ch.is_ascii_digit())
+            && token.chars().any(|ch| ch.is_ascii_alphabetic())
+            && !token.contains("://")
+            && shannon_entropy(token) >= 4.0
+    })
 }
 
 #[cfg(test)]
@@ -446,6 +458,21 @@ mod tests {
         assert!(kinds("short").is_empty());
         let hits = detect(&[word("Aa0Bb1Cc2Dd3Ee4Ff5Gg")]);
         assert_eq!(hits[0].1.width, 3);
+    }
+
+    #[test]
+    fn common_numbers_and_lines_are_not_flagged() {
+        // Passes Luhn, but a millisecond timestamp is not a card.
+        assert!(kinds("1761300000003").is_empty());
+        // Passes the Medicare checksum, but an 04 number is a mobile.
+        assert!(kinds("0412345611").is_empty());
+        assert!(kinds("000000000").is_empty());
+        assert!(kinds("Quarterly revenue grew while expenses held steady overall").is_empty());
+        assert!(kinds("https://github.com/jusso-dev/snapper/releases/v1").is_empty());
+        assert_eq!(
+            kinds("token q8Zr2LmX0vB7nT4kPw9sD1fH"),
+            vec![Finding::HighEntropy]
+        );
     }
 
     #[test]

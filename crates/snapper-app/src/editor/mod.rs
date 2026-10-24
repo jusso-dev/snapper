@@ -32,6 +32,8 @@ pub struct EditorApp {
     confirm_close: bool,
     fitted: bool,
     reload_texture: bool,
+    /// True while a primary press that started on the canvas is held.
+    canvas_press: bool,
     output_note: String,
     /// Steps to run when the user saves, instead of the default pipeline.
     after: Vec<crate::output::OutputStep>,
@@ -56,6 +58,7 @@ impl EditorApp {
             confirm_close: false,
             fitted: false,
             reload_texture: true,
+            canvas_press: false,
             output_note: String::new(),
             after: Vec::new(),
         }
@@ -126,6 +129,7 @@ impl EditorApp {
     }
 
     fn restore(&mut self, step: impl FnOnce(&mut Document) -> bool) {
+        self.session.cancel_gesture();
         let before = pixel_effects(&self.doc);
         if step(&mut self.doc) {
             self.dirty = true;
@@ -406,20 +410,33 @@ impl EditorApp {
     }
 
     fn pointer(&mut self, ui: &egui::Ui, response: &egui::Response, view: View) {
+        // Only presses on the canvas start a gesture, so clicks on the toolbar,
+        // sliders, or the text popup never reach the tool session.
+        let on_canvas = response.hovered();
+        let canvas_press = &mut self.canvas_press;
         let event = ui.input(|input| {
             let pos = input
                 .pointer
                 .interact_pos()
-                .or_else(|| input.pointer.hover_pos())?;
+                .or_else(|| input.pointer.hover_pos())
+                .or_else(|| input.pointer.latest_pos());
             let kind = if input.pointer.primary_pressed() {
+                *canvas_press = on_canvas;
                 PointerKind::Pressed
             } else if input.pointer.primary_released() {
+                if !std::mem::take(canvas_press) {
+                    return None;
+                }
                 PointerKind::Released
-            } else if input.pointer.primary_down() && response.dragged() {
+            } else if *canvas_press && input.pointer.primary_down() && response.dragged() {
                 PointerKind::Moved
             } else {
                 return None;
             };
+            if !*canvas_press && kind != PointerKind::Released {
+                return None;
+            }
+            let pos = pos?;
             Some(PointerEvent {
                 kind,
                 point: screen_to_image(pos.x, pos.y, view),
@@ -694,7 +711,7 @@ fn dashed_rect(ui: &egui::Ui, rect: snapper_editor::RectF, view: View, colour: C
         Pos2::new(x2, y2),
         Pos2::new(x, y2),
     ];
-    let stroke = Stroke::new(1.5, colour);
+    let stroke = Stroke::new(1.5_f32, colour);
     for index in 0..4 {
         dash_line(ui, corners[index], corners[(index + 1) % 4], stroke);
     }

@@ -11,10 +11,11 @@ use snapper_core::settings::{HeaderSetting, UploadConfig};
 use crate::secrets::SecretStore;
 use crate::UploadError;
 
-/// Read `path` and return an [`UploadConfig::Http`] target.
+/// Read `path` and return an [`UploadConfig::Http`] target whose id is not in `taken`.
 pub fn import_sxcu(
     path: &Path,
     secrets: &(dyn SecretStore + Sync),
+    taken: &[&str],
 ) -> Result<UploadConfig, UploadError> {
     let text = std::fs::read_to_string(path).map_err(|err| UploadError::Config(err.to_string()))?;
     let value: Value =
@@ -23,7 +24,25 @@ pub fn import_sxcu(
         .get("Name")
         .and_then(|item| item.as_str())
         .unwrap_or("custom");
-    let id = slug(name);
+    let id = unique_id(&slug(name), taken);
+    for field in ["Arguments", "Parameters"] {
+        if value
+            .get(field)
+            .and_then(|item| item.as_object())
+            .is_some_and(|map| !map.is_empty())
+        {
+            return Err(UploadError::Config(format!(
+                "sxcu {field} are not supported yet"
+            )));
+        }
+    }
+    if let Some(body) = value.get("Body").and_then(|item| item.as_str()) {
+        if body != "MultipartFormData" {
+            return Err(UploadError::Config(format!(
+                "sxcu Body {body} is not supported; only MultipartFormData is"
+            )));
+        }
+    }
     let url = value
         .get("RequestURL")
         .and_then(|item| item.as_str())
@@ -39,35 +58,45 @@ pub fn import_sxcu(
         .and_then(|item| item.as_str())
         .unwrap_or("file")
         .to_owned();
-    let mut headers = Vec::new();
+    let url_json_pointer = value
+        .get("URL")
+        .and_then(|item| item.as_str())
+        .map(sharex_pointer)
+        .transpose()?
+        .unwrap_or_default();
+    // A deletion URL is optional, so an unsupported template is dropped
+    // rather than failing the import.
+    let delete_url_json_pointer = value
+        .get("DeletionURL")
+        .and_then(|item| item.as_str())
+        .and_then(|pattern| sharex_pointer(pattern).ok())
+        .unwrap_or_default();
+    let mut pending = Vec::new();
     if let Some(map) = value.get("Headers").and_then(|item| item.as_object()) {
         for (name, header_value) in map {
             let Some(raw) = header_value.as_str() else {
                 continue;
             };
-            let stored = if secret_header(name, raw) {
-                let account = format!("http:{id}:{name}");
-                secrets.set(&account, raw)?;
-                format!("keyring:{account}")
-            } else {
-                raw.to_owned()
-            };
-            headers.push(HeaderSetting {
-                name: name.clone(),
-                value: stored,
-            });
+            if raw.starts_with("keyring:") {
+                return Err(UploadError::Config(format!(
+                    "header {name} refers to a keychain entry"
+                )));
+            }
+            pending.push((name.clone(), raw.to_owned()));
         }
     }
-    let url_json_pointer = value
-        .get("URL")
-        .and_then(|item| item.as_str())
-        .map(sharex_pointer)
-        .unwrap_or_default();
-    let delete_url_json_pointer = value
-        .get("DeletionURL")
-        .and_then(|item| item.as_str())
-        .map(sharex_pointer)
-        .unwrap_or_default();
+    // Secrets are stored last so a rejected file leaves nothing in the keychain.
+    let mut headers = Vec::new();
+    for (name, raw) in pending {
+        let value = if secret_header(&name, &raw) {
+            let account = format!("http:{id}:{name}");
+            secrets.set(&account, &raw)?;
+            format!("keyring:{account}")
+        } else {
+            raw
+        };
+        headers.push(HeaderSetting { name, value });
+    }
     Ok(UploadConfig::Http {
         id,
         url,
@@ -86,7 +115,21 @@ fn secret_header(name: &str, value: &str) -> bool {
         || name.contains("secret")
         || name.contains("api-key")
         || name.contains("apikey")
+        || name.contains("api_key")
+        || name.contains("cookie")
+        || name.contains("password")
         || value.to_ascii_lowercase().starts_with("bearer ")
+}
+
+/// `base`, or `base-2`, `base-3`, ... if `base` is in `taken`.
+pub fn unique_id(base: &str, taken: &[&str]) -> String {
+    let mut id = base.to_owned();
+    let mut n = 2;
+    while taken.contains(&id.as_str()) {
+        id = format!("{base}-{n}");
+        n += 1;
+    }
+    id
 }
 
 fn slug(name: &str) -> String {
@@ -106,23 +149,39 @@ fn slug(name: &str) -> String {
     }
 }
 
-/// `$json:data.link$` becomes `/data/link`. A value that is already a pointer is kept.
-pub fn sharex_pointer(pattern: &str) -> String {
+/// `$json:data.link$` and `{json:data.link}` become `/data/link`; `data[0]`
+/// becomes `/data/0`. An empty pointer, from an empty value or `{response}`,
+/// means the whole response body. A value that is already a pointer is kept.
+pub fn sharex_pointer(pattern: &str) -> Result<String, UploadError> {
     let trimmed = pattern.trim();
-    if let Some(inner) = trimmed
+    if matches!(trimmed, "" | "{response}" | "$response$") {
+        return Ok(String::new());
+    }
+    let inner = trimmed
         .strip_prefix("$json:")
         .and_then(|rest| rest.strip_suffix('$'))
-    {
-        let path = inner.split('|').next().unwrap_or(inner);
-        return dots_to_pointer(path);
+        .or_else(|| {
+            trimmed
+                .strip_prefix("{json:")
+                .and_then(|rest| rest.strip_suffix('}'))
+        });
+    if let Some(inner) = inner {
+        if !inner.contains(['$', '{', '}']) {
+            let path = inner.split('|').next().unwrap_or(inner);
+            return Ok(dots_to_pointer(path));
+        }
+    } else if trimmed.starts_with('/') {
+        return Ok(trimmed.to_owned());
+    } else if !trimmed.contains(['$', '{', '}', ':']) {
+        return Ok(dots_to_pointer(trimmed));
     }
-    if trimmed.starts_with('/') {
-        return trimmed.to_owned();
-    }
-    dots_to_pointer(trimmed)
+    Err(UploadError::Config(format!(
+        "URL template {trimmed:?} is not supported; use a single {{json:...}} value"
+    )))
 }
 
 fn dots_to_pointer(path: &str) -> String {
+    let path = path.replace('[', ".").replace(']', "");
     let path = path.trim_matches('/');
     if path.is_empty() {
         return String::new();
@@ -162,7 +221,7 @@ mod tests {
         )
         .expect("write");
         let secrets = MemorySecretStore::default();
-        let config = import_sxcu(&path, &secrets).expect("import");
+        let config = import_sxcu(&path, &secrets, &[]).expect("import");
         let text = toml::to_string(&config).expect("toml");
         assert!(!text.contains("super-secret"), "{text}");
         assert!(!text.contains("Bearer"), "{text}");
@@ -203,8 +262,107 @@ mod tests {
 
     #[test]
     fn sharex_json_syntax_becomes_a_pointer() {
-        assert_eq!(sharex_pointer("$json:data.link$"), "/data/link");
-        assert_eq!(sharex_pointer("/data/link"), "/data/link");
-        assert_eq!(sharex_pointer("$json:url|raw$"), "/url");
+        let pointer = |pattern| sharex_pointer(pattern).expect(pattern);
+        assert_eq!(pointer("$json:data.link$"), "/data/link");
+        assert_eq!(pointer("{json:data.link}"), "/data/link");
+        assert_eq!(pointer("{json:files[0].url}"), "/files/0/url");
+        assert_eq!(pointer("/data/link"), "/data/link");
+        assert_eq!(pointer("$json:url|raw$"), "/url");
+        assert_eq!(pointer("{response}"), "");
+        assert!(sharex_pointer("https://i.host/{json:id}").is_err());
+    }
+
+    fn write_sxcu(dir: &tempfile::TempDir, body: &str) -> std::path::PathBuf {
+        let path = dir.path().join("example.sxcu");
+        std::fs::write(&path, body).expect("write");
+        path
+    }
+
+    #[test]
+    fn sxcu_import_rejects_a_keyring_reference_in_a_header() {
+        let dir = tempfile::tempdir().expect("temp");
+        let path = write_sxcu(
+            &dir,
+            r#"{ "Name": "x", "RequestURL": "https://evil.example/", "Headers": { "X-Note": "keyring:s3:prod" } }"#,
+        );
+        let secrets = MemorySecretStore::default();
+        assert!(import_sxcu(&path, &secrets, &[]).is_err());
+    }
+
+    #[test]
+    fn sxcu_import_does_not_reuse_an_existing_id() {
+        let dir = tempfile::tempdir().expect("temp");
+        let path = write_sxcu(
+            &dir,
+            r#"{ "Name": "Example host", "RequestURL": "https://example.com/", "Headers": { "Authorization": "Bearer new" } }"#,
+        );
+        let secrets = MemorySecretStore::default();
+        secrets
+            .set("http:example-host:Authorization", "Bearer old")
+            .expect("store");
+        let config = import_sxcu(&path, &secrets, &["example-host"]).expect("import");
+        assert_eq!(config.id(), "example-host-2");
+        assert_eq!(
+            secrets
+                .get("http:example-host:Authorization")
+                .expect("secret"),
+            "Bearer old"
+        );
+    }
+
+    #[test]
+    fn sxcu_import_drops_an_unsupported_deletion_url() {
+        let dir = tempfile::tempdir().expect("temp");
+        let path = write_sxcu(
+            &dir,
+            r#"{ "Name": "x", "RequestURL": "https://example.com/", "URL": "{json:url}", "DeletionURL": "https://example.com/delete/{json:id}" }"#,
+        );
+        let secrets = MemorySecretStore::default();
+        let UploadConfig::Http {
+            url_json_pointer,
+            delete_url_json_pointer,
+            ..
+        } = import_sxcu(&path, &secrets, &[]).expect("import")
+        else {
+            panic!("http config");
+        };
+        assert_eq!(url_json_pointer, "/url");
+        assert_eq!(delete_url_json_pointer, "");
+    }
+
+    #[test]
+    fn sxcu_import_rejects_an_unsupported_url_without_storing_secrets() {
+        let dir = tempfile::tempdir().expect("temp");
+        let path = write_sxcu(
+            &dir,
+            r#"{ "Name": "x", "RequestURL": "https://example.com/", "URL": "https://i.example.com/{json:id}", "Headers": { "Authorization": "Bearer secret" } }"#,
+        );
+        let secrets = MemorySecretStore::default();
+        assert!(import_sxcu(&path, &secrets, &[]).is_err());
+        assert!(secrets.get("http:x:Authorization").is_err());
+    }
+
+    #[test]
+    fn sxcu_import_keeps_cookies_out_of_config() {
+        let dir = tempfile::tempdir().expect("temp");
+        let path = write_sxcu(
+            &dir,
+            r#"{ "Name": "x", "RequestURL": "https://example.com/", "Headers": { "Cookie": "session=hunter2", "X-Api-Key": "k-123" } }"#,
+        );
+        let secrets = MemorySecretStore::default();
+        let config = import_sxcu(&path, &secrets, &[]).expect("import");
+        let text = toml::to_string(&config).expect("toml");
+        assert!(!text.contains("hunter2"), "{text}");
+        assert!(!text.contains("k-123"), "{text}");
+        assert_eq!(
+            secrets.get("http:x:Cookie").expect("secret"),
+            "session=hunter2"
+        );
+    }
+
+    #[test]
+    fn unique_id_skips_taken_ids() {
+        assert_eq!(unique_id("s3", &[]), "s3");
+        assert_eq!(unique_id("s3", &["s3", "s3-2"]), "s3-3");
     }
 }

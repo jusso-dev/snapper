@@ -4,10 +4,10 @@
 //! to stdin. One JSON line is read from stdout. The process is killed when
 //! `timeout` elapses.
 
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -60,14 +60,14 @@ impl UploadTarget for ExternalTarget {
         bytes: Vec<u8>,
         mime: &str,
     ) -> Result<UploadResult, UploadError> {
+        // The temp file is removed when `file` drops.
         let file = write_temp(name, &bytes)?;
-        let result = run_plugin(&self.path, &file, mime, &self.config, self.timeout);
-        let _ = std::fs::remove_file(&file);
-        result
+        run_plugin(&self.path, &file, mime, &self.config, self.timeout)
     }
 }
 
-fn write_temp(name: &str, bytes: &[u8]) -> Result<PathBuf, UploadError> {
+/// A unique, owner-only temp file named after `name`.
+fn write_temp(name: &str, bytes: &[u8]) -> Result<tempfile::TempPath, UploadError> {
     let safe = name
         .chars()
         .map(|ch| {
@@ -78,9 +78,14 @@ fn write_temp(name: &str, bytes: &[u8]) -> Result<PathBuf, UploadError> {
             }
         })
         .collect::<String>();
-    let path = std::env::temp_dir().join(format!("snapper-upload-{}-{safe}", std::process::id()));
-    std::fs::write(&path, bytes).map_err(|err| UploadError::Config(err.to_string()))?;
-    Ok(path)
+    let mut file = tempfile::Builder::new()
+        .prefix("snapper-upload-")
+        .suffix(&format!("-{safe}"))
+        .tempfile()
+        .map_err(|err| UploadError::Config(err.to_string()))?;
+    file.write_all(bytes)
+        .map_err(|err| UploadError::Config(err.to_string()))?;
+    Ok(file.into_temp_path())
 }
 
 /// Spawn `path`, send one request, and read one response line.
@@ -106,33 +111,49 @@ pub fn run_plugin(
         .stderr(Stdio::null())
         .spawn()
         .map_err(|err| UploadError::Config(format!("could not start {}: {err}", path.display())))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(&payload)
-            .map_err(|err| UploadError::Protocol(err.to_string()))?;
-    }
-    let mut stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| UploadError::Protocol("plugin stdout was closed".to_owned()))?;
+    let deadline = Instant::now() + timeout;
+    let stdin = child.stdin.take();
+    let Some(stdout) = child.stdout.take() else {
+        kill(&mut child);
+        return Err(UploadError::Protocol("plugin stdout was closed".to_owned()));
+    };
     let (sender, receiver) = std::sync::mpsc::channel();
+    // The write happens on this thread too, so a plugin that never reads stdin
+    // is still covered by the timeout.
     std::thread::spawn(move || {
+        let written = match stdin {
+            Some(mut stdin) => stdin.write_all(&payload),
+            None => Ok(()),
+        };
         let mut line = String::new();
-        let mut reader = std::io::BufReader::new(&mut stdout);
-        let _ = reader.read_line(&mut line);
-        let _ = sender.send(line);
+        let _ = std::io::BufReader::new(stdout).read_line(&mut line);
+        let _ = sender.send((written, line));
     });
-    match receiver.recv_timeout(timeout) {
-        Ok(line) => {
-            let _ = child.wait();
-            parse_response(&line)
-        }
-        Err(_) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            Err(UploadError::Timeout)
+    let Ok((written, line)) = receiver.recv_timeout(timeout) else {
+        kill(&mut child);
+        return Err(UploadError::Timeout);
+    };
+    wait_until(&mut child, deadline);
+    match written {
+        Err(err) if line.trim().is_empty() => Err(UploadError::Protocol(err.to_string())),
+        _ => parse_response(&line),
+    }
+}
+
+/// Reap `child`, killing it if it is still running at `deadline`.
+fn wait_until(child: &mut Child, deadline: Instant) {
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            _ => return kill(child),
         }
     }
+}
+
+fn kill(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 pub(crate) fn parse_response(line: &str) -> Result<UploadResult, UploadError> {
@@ -150,12 +171,18 @@ pub(crate) fn parse_response(line: &str) -> Result<UploadResult, UploadError> {
     })
 }
 
-/// `snapper-plugin-<id>` on `PATH`, unless `command` is set.
+/// `snapper-plugin-<id>` in the plugins directory or on `PATH`, unless `command` is set.
 pub fn resolve_command(id: &str, command: &str) -> Result<PathBuf, UploadError> {
     if !command.is_empty() {
         return Ok(PathBuf::from(command));
     }
     let name = format!("snapper-plugin-{id}");
+    let installed = snapper_core::settings::data_dir()
+        .join("plugins")
+        .join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+    if installed.is_file() {
+        return Ok(installed);
+    }
     if let Some(path) = lookup_path(&name) {
         return Ok(path);
     }
@@ -225,12 +252,32 @@ pub fn discover() -> Vec<DiscoveredPlugin> {
     found
 }
 
+/// Run `path --describe`. A plugin that does not answer within a few seconds is killed.
 pub fn describe(path: &Path) -> Result<serde_json::Value, UploadError> {
-    let output = Command::new(path)
+    let mut child = Command::new(path)
         .arg("--describe")
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
         .map_err(|err| UploadError::Config(err.to_string()))?;
-    serde_json::from_slice(&output.stdout).map_err(|err| UploadError::Protocol(err.to_string()))
+    let Some(mut stdout) = child.stdout.take() else {
+        kill(&mut child);
+        return Err(UploadError::Protocol("plugin stdout was closed".to_owned()));
+    };
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut output = Vec::new();
+        let _ = stdout.read_to_end(&mut output);
+        let _ = sender.send(output);
+    });
+    let timeout = Duration::from_secs(5);
+    let Ok(output) = receiver.recv_timeout(timeout) else {
+        kill(&mut child);
+        return Err(UploadError::Timeout);
+    };
+    wait_until(&mut child, Instant::now() + Duration::from_secs(1));
+    serde_json::from_slice(&output).map_err(|err| UploadError::Protocol(err.to_string()))
 }
 
 #[cfg(test)]

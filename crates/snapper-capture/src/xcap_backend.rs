@@ -134,16 +134,27 @@ fn visible_window(window: &xcap::Window, own_pid: u32) -> Option<WindowInfo> {
     if !keep_window(&title, &app_name, width, height, pid, own_pid, minimised) {
         return None;
     }
+    let rect = Rect {
+        x: window.x().ok()?,
+        y: window.y().ok()?,
+        width,
+        height,
+    };
+    let rect = if cfg!(target_os = "macos") {
+        let scale = window
+            .current_monitor()
+            .ok()
+            .and_then(|monitor| monitor.scale_factor().ok())
+            .unwrap_or(1.0);
+        points_to_pixels(rect, scale)
+    } else {
+        rect
+    };
     Some(WindowInfo {
         id: u64::from(window.id().ok()?),
         title,
         app_name,
-        rect: Rect {
-            x: window.x().ok()?,
-            y: window.y().ok()?,
-            width,
-            height,
-        },
+        rect,
         is_minimised: minimised,
     })
 }
@@ -199,18 +210,43 @@ fn is_shell_chrome(title: &str, app_name: &str) -> bool {
 fn monitor_info(monitor: &xcap::Monitor) -> Result<MonitorInfo, CaptureError> {
     let id = monitor.id().map_err(map_xcap_error)?;
     let name = monitor.name().unwrap_or_else(|_| format!("Monitor {id}"));
+    let scale_factor = monitor.scale_factor().unwrap_or(1.0);
+    let rect = snapper_core::Rect {
+        x: monitor.x().map_err(map_xcap_error)?,
+        y: monitor.y().map_err(map_xcap_error)?,
+        width: monitor.width().map_err(map_xcap_error)?,
+        height: monitor.height().map_err(map_xcap_error)?,
+    };
     Ok(MonitorInfo {
         id,
         name,
-        rect: snapper_core::Rect {
-            x: monitor.x().map_err(map_xcap_error)?,
-            y: monitor.y().map_err(map_xcap_error)?,
-            width: monitor.width().map_err(map_xcap_error)?,
-            height: monitor.height().map_err(map_xcap_error)?,
+        rect: if cfg!(target_os = "macos") {
+            points_to_pixels(rect, scale_factor)
+        } else {
+            rect
         },
-        scale_factor: monitor.scale_factor().unwrap_or(1.0),
+        scale_factor,
         is_primary: monitor.is_primary().unwrap_or(false),
     })
+}
+
+/// xcap reports macOS monitor and window bounds in points, but its bitmaps
+/// and the [`MonitorInfo`] and [`WindowInfo`] rects are in physical pixels.
+///
+/// Each origin is scaled by its own display's factor. That keeps a single
+/// display, or displays sharing one scale, consistent; mixing Retina and
+/// non-Retina displays is not supported yet.
+fn points_to_pixels(rect: snapper_core::Rect, scale_factor: f32) -> snapper_core::Rect {
+    if !scale_factor.is_finite() || scale_factor <= 0.0 {
+        return rect;
+    }
+    let scale = f64::from(scale_factor);
+    snapper_core::Rect {
+        x: (f64::from(rect.x) * scale).round() as i32,
+        y: (f64::from(rect.y) * scale).round() as i32,
+        width: (f64::from(rect.width) * scale).round() as u32,
+        height: (f64::from(rect.height) * scale).round() as u32,
+    }
 }
 
 fn image_from_rgba(image: image::RgbaImage, scale_factor: f32) -> Image {
@@ -258,6 +294,27 @@ fn is_black(image: &Image) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retina_points_become_pixels() {
+        let points = Rect {
+            x: -1440,
+            y: 0,
+            width: 1440,
+            height: 900,
+        };
+        let pixels = points_to_pixels(points, 2.0);
+        assert_eq!(
+            pixels,
+            Rect {
+                x: -2880,
+                y: 0,
+                width: 2880,
+                height: 1800,
+            }
+        );
+        assert_eq!(points_to_pixels(points, 0.0), points);
+    }
 
     #[test]
     fn backend_name_is_xcap() {

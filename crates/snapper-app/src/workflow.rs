@@ -1,8 +1,9 @@
 //! Named after-capture workflows.
 //!
-//! A workflow that annotates opens the editor with the remaining steps. Those
-//! steps run when the user saves. Redaction before the editor is inserted as
-//! reviewable pixelate items rather than baked into the image.
+//! A workflow that annotates runs the steps before Annotate on the capture,
+//! then opens the editor with the remaining steps. Those steps run when the
+//! user saves. Redaction before the editor is also inserted as reviewable
+//! pixelate items.
 
 use snapper_capture::default_capturer;
 use snapper_core::settings::{CaptureKind, LinkFormat, PipelineStep, Workflow};
@@ -53,8 +54,23 @@ pub fn run(workflow: &Workflow, settings: &Settings, last_region: &mut Option<Re
 }
 
 fn open_editor(workflow: &Workflow, settings: &Settings, image: Image, annotate_at: usize) {
+    let before = &workflow.steps[..annotate_at];
+    // Steps such as Save or Clipboard before Annotate run on the capture now.
+    // A Redact among them is baked in for those steps and also shown in the
+    // editor as reviewable items.
+    if before
+        .iter()
+        .any(|step| !matches!(step, PipelineStep::Redact))
+    {
+        let steps = before
+            .iter()
+            .filter_map(|step| step_to_output(step, workflow.link_format))
+            .collect::<Vec<_>>();
+        let ctx = output::context_for(&image);
+        output::run_with(&steps, &image, &ctx, settings);
+    }
     let mut doc = Document::new(image);
-    if workflow.steps[..annotate_at]
+    if before
         .iter()
         .any(|step| matches!(step, PipelineStep::Redact))
     {
@@ -69,7 +85,6 @@ fn open_editor(workflow: &Workflow, settings: &Settings, image: Image, annotate_
     }
     let after = workflow.steps[annotate_at + 1..]
         .iter()
-        .filter(|step| !matches!(step, PipelineStep::Redact))
         .filter_map(|step| step_to_output(step, workflow.link_format))
         .collect();
     crate::editor::run_editor_after(doc, settings.clone(), after);

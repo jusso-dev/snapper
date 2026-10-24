@@ -25,7 +25,8 @@ pub struct ScrollSession<G, W, D> {
     pub max_height: u32,
 }
 
-/// Capture until the frame repeats, the stitch reaches `max_height`, or `stop` is set.
+/// Capture until the frame repeats, a frame adds no rows, the stitch reaches
+/// `max_height`, or `stop` is set.
 pub fn run_session<G, W, D>(session: &mut ScrollSession<G, W, D>) -> Result<Image, String>
 where
     G: FnMut() -> Result<Image, String>,
@@ -33,6 +34,7 @@ where
     D: FnMut(),
 {
     let mut frames = Vec::new();
+    let mut stitched_height = 0;
     loop {
         if session.stop.load(Ordering::Relaxed) {
             break;
@@ -45,9 +47,13 @@ where
             break;
         }
         frames.push(frame);
-        if stitch(&frames, MIN_OVERLAP).height >= session.max_height {
+        let height = stitch(&frames, MIN_OVERLAP).height;
+        // A page with a caret or animation never repeats exactly, but once it
+        // stops scrolling a new frame adds nothing.
+        if height >= session.max_height || height <= stitched_height {
             break;
         }
+        stitched_height = height;
         if session.stop.load(Ordering::Relaxed) {
             break;
         }
@@ -93,6 +99,7 @@ pub fn run(settings: &Settings) -> Result<Option<Image>, String> {
     };
     let stop = Arc::new(AtomicBool::new(false));
     let stop_loop = Arc::clone(&stop);
+    let finished = Arc::clone(&stop);
     let delay = settings.scroll_delay_ms;
     let max_height = settings.scroll_max_height;
     let worker = std::thread::Builder::new()
@@ -105,7 +112,10 @@ pub fn run(settings: &Settings) -> Result<Option<Image>, String> {
                 stop: stop_loop,
                 max_height,
             };
-            run_session(&mut session)
+            let result = run_session(&mut session);
+            // Close the Stop window when the capture ends on its own.
+            finished.store(true, Ordering::Relaxed);
+            result
         })
         .map_err(|err| err.to_string())?;
     stop_window(Arc::clone(&stop));
@@ -198,11 +208,14 @@ impl eframe::App for StopApp {
 mod tests {
     use super::*;
 
+    /// A 6x20 view of a tall page, scrolled down `seed * 5` rows.
     fn frame(seed: u8) -> Image {
-        let mut rgba = vec![0; 4 * 6 * 20];
-        for (index, pixel) in rgba.chunks_exact_mut(4).enumerate() {
-            pixel[0] = seed.wrapping_add(index as u8);
-            pixel[3] = 255;
+        let mut rgba = Vec::with_capacity(4 * 6 * 20);
+        for row in 0..20u8 {
+            let page_row = row.wrapping_add(seed.wrapping_mul(5));
+            for column in 0..6u8 {
+                rgba.extend_from_slice(&[page_row, page_row.wrapping_mul(7), column, 255]);
+            }
         }
         Image {
             width: 6,

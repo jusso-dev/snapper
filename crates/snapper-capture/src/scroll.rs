@@ -118,16 +118,17 @@ fn new_row_start(
         max_band = content_h;
     }
     let min_band = min_overlap.max(1).min(max_band);
-    let mut probe = max_band;
-    loop {
-        let (offset, sad) = align_band(prev, next, width, content_top, content_bottom, probe);
-        if sad == 0 {
-            return offset + probe;
+    // Look for an exact match at every scroll distance: the widest band first,
+    // then narrower bands for scrolls too big for it. Each check stops at the
+    // first differing row, so a frame with no exact match stays cheap.
+    let widest = content_h - max_band;
+    let distances = (0..=widest).rev().chain(widest + 1..=content_h - min_band);
+    for distance in distances {
+        let band = max_band.min(content_h - distance);
+        let next_row = content_bottom - band - distance;
+        if band_sad(prev, next, width, content_bottom - band, next_row, band, 1) == 0 {
+            return content_bottom - distance;
         }
-        if probe <= min_band {
-            break;
-        }
-        probe -= 1;
     }
     let (offset, _) = align_band(prev, next, width, content_top, content_bottom, max_band);
     offset + max_band
@@ -150,7 +151,7 @@ fn align_band(
     let mut best_sad = u64::MAX;
     let mut offset = content_top;
     while offset <= last {
-        let sad = band_sad(prev, next, width, band_prev, offset, band);
+        let sad = band_sad(prev, next, width, band_prev, offset, band, best_sad);
         if sad < best_sad {
             best_sad = sad;
             best_o = offset;
@@ -170,7 +171,7 @@ fn align_band(
         let from = best_o.saturating_sub(step).max(content_top);
         let to = (best_o + step).min(last);
         for offset in from..=to {
-            let sad = band_sad(prev, next, width, band_prev, offset, band);
+            let sad = band_sad(prev, next, width, band_prev, offset, band, best_sad);
             if sad < best_sad {
                 best_sad = sad;
                 best_o = offset;
@@ -187,6 +188,7 @@ fn band_sad(
     prev_row: u32,
     next_row: u32,
     band: u32,
+    limit: u64,
 ) -> u64 {
     let mut sad = 0u64;
     for index in 0..band {
@@ -195,6 +197,10 @@ fn band_sad(
         match (left, right) {
             (Some(left), Some(right)) => sad = sad.saturating_add(row_sad(left, right)),
             _ => return u64::MAX,
+        }
+        // Past `limit` the caller has no use for the exact total.
+        if sad >= limit {
+            return sad;
         }
     }
     sad
@@ -235,6 +241,27 @@ fn push_rows(rows: &mut Vec<Vec<u8>>, image: &Image, width: u32, start: u32, end
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frames_with_no_exact_match_stitch_quickly() {
+        let noise = |seed: u32| {
+            painted(640, 1000, move |x, y| {
+                let value = (x.wrapping_mul(7919) ^ y.wrapping_mul(104_729) ^ seed)
+                    .wrapping_mul(2_654_435_761)
+                    >> 24;
+                [value as u8, (value >> 1) as u8, 40, 255]
+            })
+        };
+        let frames = [noise(1), noise(2), noise(3)];
+        let started = std::time::Instant::now();
+        let image = stitch(&frames, 40);
+        assert!(image.height > 1000);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(20),
+            "stitch took {:?}",
+            started.elapsed()
+        );
+    }
 
     fn painted(width: u32, height: u32, pixel: impl Fn(u32, u32) -> [u8; 4]) -> Image {
         let mut rgba = Vec::with_capacity((width * height * 4) as usize);

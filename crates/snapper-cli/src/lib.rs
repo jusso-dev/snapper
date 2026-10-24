@@ -372,22 +372,21 @@ fn edit(path: &Path) -> Result<(), Failure> {
             path.display()
         )));
     }
+    // A running app has its own working directory, so send an absolute path.
+    let path = std::path::absolute(path).map_err(|err| Failure::failed(err.to_string()))?;
     let program = editor_program();
-    let status = Command::new(&program)
+    // Not waited on: when no app is running, the launched one stays resident.
+    Command::new(&program)
         .arg("--open-editor")
-        .arg(path)
-        .status()
+        .arg(&path)
+        .spawn()
         .map_err(|err| {
             Failure::failed(format!(
                 "could not launch {} --open-editor: {err}",
                 program.display()
             ))
         })?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(Failure::failed(format!("snapper-app exited with {status}")))
-    }
+    Ok(())
 }
 
 /// `snapper-app` next to this executable, or `snapper-app` on `PATH`.

@@ -1,0 +1,2 @@
+# Matches workspace.package.rust-version, so clippy does not suggest newer APIs.
+msrv = "1.80"

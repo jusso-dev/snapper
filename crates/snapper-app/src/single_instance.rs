@@ -35,10 +35,20 @@ fn bind_or_forward(socket_name: &str, args: &[String]) -> Result<Claim, String> 
     let name = namespaced(socket_name)?;
     match ListenerOptions::new().name(name).create_sync() {
         Ok(listener) => Ok(Claim::Primary(listener)),
-        Err(err) if socket_is_taken(&err) => {
-            forward(socket_name, args)?;
-            Ok(Claim::Forwarded)
-        }
+        Err(err) if socket_is_taken(&err) => match forward(socket_name, args) {
+            Ok(()) => Ok(Claim::Forwarded),
+            // A socket file left by a process that was killed refuses
+            // connections. Nobody owns it, so replace it.
+            Err(err) if err.kind() == std::io::ErrorKind::ConnectionRefused => {
+                ListenerOptions::new()
+                    .name(namespaced(socket_name)?)
+                    .try_overwrite(true)
+                    .create_sync()
+                    .map(Claim::Primary)
+                    .map_err(|err| err.to_string())
+            }
+            Err(err) => Err(err.to_string()),
+        },
         Err(err) => Err(err.to_string()),
     }
 }
@@ -82,16 +92,13 @@ fn read_forward(stream: Stream) -> Vec<String> {
     }
 }
 
-fn forward(socket_name: &str, args: &[String]) -> Result<(), String> {
-    let name = namespaced(socket_name)?;
-    let mut stream = Stream::connect(name).map_err(|err| err.to_string())?;
+fn forward(socket_name: &str, args: &[String]) -> std::io::Result<()> {
+    let name = namespaced(socket_name).map_err(std::io::Error::other)?;
+    let mut stream = Stream::connect(name)?;
     let mut line = encode_args(args);
     line.push('\n');
-    stream
-        .write_all(line.as_bytes())
-        .map_err(|err| err.to_string())?;
-    stream.flush().map_err(|err| err.to_string())?;
-    Ok(())
+    stream.write_all(line.as_bytes())?;
+    stream.flush()
 }
 
 fn namespaced(socket_name: &str) -> Result<Name<'_>, String> {
@@ -162,6 +169,21 @@ mod tests {
             .expect("arguments");
         server.join().expect("server");
         assert_eq!(got, args);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_socket_left_by_a_killed_process_is_replaced() {
+        let name = format!("snapper-test-stale-{}", std::process::id());
+        let stale = ListenerOptions::new()
+            .name(namespaced(&name).expect("name"))
+            .reclaim_name(false)
+            .create_sync()
+            .expect("bind");
+        drop(stale);
+        let Claim::Primary(_listener) = bind_or_forward(&name, &[]).expect("claim") else {
+            panic!("the stale socket should be replaced");
+        };
     }
 
     #[test]

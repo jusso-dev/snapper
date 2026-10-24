@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use snapper_capture::default_capturer;
+use snapper_capture::{default_capturer, MonitorInfo};
 use snapper_core::template::{self, TemplateContext};
 use snapper_core::{Image, Rect, Settings};
 use snapper_record::{stamp_cursor, RecordFormat, Recorder};
@@ -137,16 +137,22 @@ fn capture_with_cursor(region: Rect) -> Result<Image, snapper_record::RecordErro
         },
     )
     .map_err(|err| snapper_record::RecordError::Backend(err.to_string()))?;
-    if let Some((x, y)) = cursor_in_region(region) {
+    if let Some((x, y)) = cursor_in_region(region, &monitors) {
         stamp_cursor(&mut cropped, x, y, false);
     }
     Ok(cropped)
 }
 
-fn cursor_in_region(region: Rect) -> Option<(i32, i32)> {
+fn cursor_in_region(region: Rect, monitors: &[MonitorInfo]) -> Option<(i32, i32)> {
     use enigo::Mouse;
     let enigo = enigo::Enigo::new(&enigo::Settings::default()).ok()?;
     let (x, y) = enigo.location().ok()?;
+    // enigo reports points on macOS and physical pixels elsewhere.
+    let (x, y) = if cfg!(target_os = "macos") {
+        points_to_physical(monitors, x, y)?
+    } else {
+        (x, y)
+    };
     let local_x = x - region.x;
     let local_y = y - region.y;
     if local_x < 0
@@ -158,6 +164,48 @@ fn cursor_in_region(region: Rect) -> Option<(i32, i32)> {
     } else {
         Some((local_x, local_y))
     }
+}
+
+fn scale(monitor: &MonitorInfo) -> f32 {
+    if monitor.scale_factor.is_finite() && monitor.scale_factor > 0.0 {
+        monitor.scale_factor
+    } else {
+        1.0
+    }
+}
+
+/// A global point position to physical pixels, using the monitor it falls on.
+fn points_to_physical(monitors: &[MonitorInfo], x: i32, y: i32) -> Option<(i32, i32)> {
+    monitors.iter().find_map(|monitor| {
+        let scale = scale(monitor);
+        let left = monitor.rect.x as f32 / scale;
+        let top = monitor.rect.y as f32 / scale;
+        let (x, y) = (x as f32, y as f32);
+        let inside = x >= left
+            && y >= top
+            && x < left + monitor.rect.width as f32 / scale
+            && y < top + monitor.rect.height as f32 / scale;
+        inside.then(|| {
+            (
+                monitor.rect.x + ((x - left) * scale).round() as i32,
+                monitor.rect.y + ((y - top) * scale).round() as i32,
+            )
+        })
+    })
+}
+
+/// The logical top and bottom edges and left edge of a physical `region`.
+fn logical_region(monitors: &[MonitorInfo], region: Rect) -> (f32, f32, f32) {
+    let monitor = monitors.iter().find(|monitor| {
+        region.x >= monitor.rect.x
+            && region.y >= monitor.rect.y
+            && region.x < monitor.rect.x + monitor.rect.width as i32
+            && region.y < monitor.rect.y + monitor.rect.height as i32
+    });
+    let scale = monitor.map_or(1.0, scale);
+    let left = region.x as f32 / scale;
+    let top = region.y as f32 / scale;
+    (left, top, top + region.height as f32 / scale)
 }
 
 struct StopApp {
@@ -173,7 +221,7 @@ impl eframe::App for StopApp {
             ui.painter().rect_stroke(
                 rect,
                 0.0,
-                eframe::egui::Stroke::new(3.0, eframe::egui::Color32::from_rgb(220, 40, 40)),
+                eframe::egui::Stroke::new(3.0_f32, eframe::egui::Color32::from_rgb(220, 40, 40)),
             );
             if response.clicked() {
                 self.stop.store(true, Ordering::Relaxed);
@@ -185,16 +233,15 @@ impl eframe::App for StopApp {
 }
 
 fn stop_window(region: Rect, stop: Arc<AtomicBool>) {
-    let y = if region.y > 80 {
-        region.y - 72
-    } else {
-        region.y + region.height as i32 + 8
-    };
+    // The viewport is placed in logical points; `region` is in physical pixels.
+    let monitors = default_capturer().monitors().unwrap_or_default();
+    let (x, top, bottom) = logical_region(&monitors, region);
+    let y = if top > 80.0 { top - 72.0 } else { bottom + 8.0 };
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Recording")
             .with_inner_size([280.0, 88.0])
-            .with_position(eframe::egui::pos2(region.x as f32, y as f32))
+            .with_position(eframe::egui::pos2(x, y))
             .with_always_on_top()
             .with_resizable(false),
         run_and_return: true,

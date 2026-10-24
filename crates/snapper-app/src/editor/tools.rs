@@ -139,6 +139,8 @@ pub struct ToolSession {
     pub text: Option<TextDraft>,
     items: Vec<Item>,
     crop: Option<Rect>,
+    /// Base image size, once synced, so crops stay inside the image.
+    image_size: Option<(u32, u32)>,
     scale: f32,
     next_id: u64,
     gesture: Option<Gesture>,
@@ -156,6 +158,7 @@ impl ToolSession {
             text: None,
             items: Vec::new(),
             crop: None,
+            image_size: None,
             scale: 1.0,
             next_id: 1,
             gesture: None,
@@ -170,6 +173,7 @@ impl ToolSession {
         }
         self.items = doc.items.clone();
         self.crop = doc.crop;
+        self.image_size = Some((doc.base.width, doc.base.height));
         self.scale = if doc.base.scale_factor.is_finite() && doc.base.scale_factor > 0.0 {
             doc.base.scale_factor
         } else {
@@ -236,10 +240,16 @@ impl ToolSession {
     }
 
     pub fn cancel(&mut self) {
+        self.cancel_gesture();
+        self.text = None;
+    }
+
+    /// Drop an in-progress drag so its release cannot emit a stale edit,
+    /// e.g. before undo or redo replaces the items it was editing.
+    pub fn cancel_gesture(&mut self) {
         self.gesture = None;
         self.live = None;
         self.live_crop = None;
-        self.text = None;
     }
 
     fn press(&mut self, point: Point) -> Option<Edit> {
@@ -379,7 +389,10 @@ impl ToolSession {
 
     fn finish_draw(&mut self, from: Point, to: Point) -> Option<Edit> {
         if self.tool == Tool::Crop {
-            let rect = core_rect(from, to)?;
+            let mut rect = core_rect(from, to)?;
+            if let Some((width, height)) = self.image_size {
+                rect = clamp_to_image(rect, width, height)?;
+            }
             let before = self.crop;
             self.crop = Some(rect);
             return Some(Edit::Crop {
@@ -492,6 +505,25 @@ fn core_rect(from: Point, to: Point) -> Option<Rect> {
         y: rect.y.round() as i32,
         width: rect.width.round().max(1.0) as u32,
         height: rect.height.round().max(1.0) as u32,
+    })
+}
+
+/// Intersect `rect` with a `width` x `height` image. `None` when they do not overlap.
+fn clamp_to_image(rect: Rect, width: u32, height: u32) -> Option<Rect> {
+    let right = i64::from(rect.x) + i64::from(rect.width);
+    let bottom = i64::from(rect.y) + i64::from(rect.height);
+    let x0 = i64::from(rect.x).clamp(0, i64::from(width));
+    let y0 = i64::from(rect.y).clamp(0, i64::from(height));
+    let x1 = right.clamp(0, i64::from(width));
+    let y1 = bottom.clamp(0, i64::from(height));
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    Some(Rect {
+        x: x0 as i32,
+        y: y0 as i32,
+        width: (x1 - x0) as u32,
+        height: (y1 - y0) as u32,
     })
 }
 
@@ -745,9 +777,19 @@ pub fn format_colour(colour: Rgba) -> String {
     )
 }
 
+const DEFAULT_COLOUR: Rgba = Rgba {
+    r: 0xE2,
+    g: 0x3D,
+    b: 0x3D,
+    a: 0xFF,
+};
+
 /// Parse `#RRGGBB` or `#RRGGBBAA`. Anything else is the default red.
 pub fn parse_colour(text: &str) -> Rgba {
     let hex = text.trim().trim_start_matches('#');
+    if !hex.is_ascii() {
+        return DEFAULT_COLOUR;
+    }
     let byte = |index: usize| u8::from_str_radix(&hex[index..index + 2], 16).ok();
     if hex.len() == 6 || hex.len() == 8 {
         if let (Some(r), Some(g), Some(b)) = (byte(0), byte(2), byte(4)) {
@@ -759,12 +801,7 @@ pub fn parse_colour(text: &str) -> Rgba {
             return Rgba { r, g, b, a };
         }
     }
-    Rgba {
-        r: 0xE2,
-        g: 0x3D,
-        b: 0x3D,
-        a: 0xFF,
-    }
+    DEFAULT_COLOUR
 }
 
 pub fn style_from_settings(colour: &str, width: f32) -> Style {
@@ -1097,7 +1134,77 @@ mod tests {
         assert_eq!(colour, "#01020304");
         assert_eq!(width, 6.5);
         assert_eq!(parse_colour("nope").r, 0xE2);
+        assert_eq!(parse_colour("aééb"), parse_colour("nope"));
+        assert_eq!(parse_colour("#ééééé"), parse_colour("nope"));
         assert!(close_needs_confirm(true));
         assert!(!close_needs_confirm(false));
+    }
+
+    #[test]
+    fn crop_is_clamped_to_the_image_and_ignored_outside_it() {
+        let mut tools = session();
+        tools.sync(&blank());
+        tools.tool = Tool::Crop;
+        let edit = drag(
+            &mut tools,
+            Point { x: -10.0, y: 40.0 },
+            Point { x: 30.0, y: 90.0 },
+        )
+        .expect("crop");
+        let Edit::Crop { after, .. } = edit else {
+            panic!("crop edit");
+        };
+        assert_eq!(
+            after,
+            Some(Rect {
+                x: 0,
+                y: 40,
+                width: 30,
+                height: 20,
+            })
+        );
+        let outside = drag(
+            &mut tools,
+            Point { x: 100.0, y: 100.0 },
+            Point { x: 140.0, y: 130.0 },
+        );
+        assert!(outside.is_none());
+    }
+
+    #[test]
+    fn cancelled_gesture_releases_without_an_edit() {
+        let mut doc = blank();
+        doc.apply(Edit::Add(Item {
+            id: 1,
+            shape: Shape::Rect {
+                rect: RectF {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 20.0,
+                    height: 16.0,
+                },
+            },
+            style: Style::default(),
+            auto: false,
+        }));
+        let mut tools = session();
+        tools.sync(&doc);
+        tools.on_pointer(PointerEvent {
+            kind: PointerKind::Pressed,
+            point: Point { x: 12.0, y: 12.0 },
+        });
+        tools.on_pointer(PointerEvent {
+            kind: PointerKind::Moved,
+            point: Point { x: 20.0, y: 20.0 },
+        });
+        assert!(doc.undo());
+        tools.cancel_gesture();
+        tools.sync(&doc);
+        let edit = tools.on_pointer(PointerEvent {
+            kind: PointerKind::Released,
+            point: Point { x: 20.0, y: 20.0 },
+        });
+        assert!(edit.is_none());
+        assert!(tools.display_items().is_empty());
     }
 }

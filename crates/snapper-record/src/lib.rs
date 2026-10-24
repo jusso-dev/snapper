@@ -277,18 +277,19 @@ fn encode_gif_stream(
     })
     .map_err(|err| RecordError::Backend(err.to_string()))?;
     let step = 1.0 / f64::from(fps.max(1));
-    let mut index = 0usize;
-    add_gif_frame(&collector, index, &first, step)?;
-    while let Ok(frame) = rx.recv() {
-        index += 1;
-        add_gif_frame(&collector, index, &frame, step)?;
-    }
+    let writing = spawn_gif_writer(writer, out)?;
+    let added = (|| {
+        add_gif_frame(&collector, 0, &first, step)?;
+        let mut index = 0usize;
+        while let Ok(frame) = rx.recv() {
+            index += 1;
+            add_gif_frame(&collector, index, &frame, step)?;
+        }
+        Ok(())
+    })();
     drop(collector);
-    let file = std::fs::File::create(out).map_err(|err| RecordError::Backend(err.to_string()))?;
-    writer
-        .write(file, &mut KeepGoing)
-        .map_err(|err| RecordError::Backend(err.to_string()))?;
-    Ok(())
+    join_gif_writer(writing)?;
+    added
 }
 
 fn add_gif_frame(
@@ -314,7 +315,7 @@ fn encode_mp4_stream(
         return Err(RecordError::Empty);
     };
     let (width, height, _) = pad_even(&first);
-    let mut child = std::process::Command::new(ffmpeg_path)
+    let child = std::process::Command::new(ffmpeg_path)
         .args(ffmpeg_args(width, height, fps, out))
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
@@ -337,27 +338,46 @@ fn encode_mp4_stream(
         };
         std::io::Write::write_all(stdin, raw).map_err(|err| RecordError::Backend(err.to_string()))
     };
-    {
-        let stdin = child
-            .stdin
-            .as_mut()
-            .ok_or_else(|| RecordError::Backend("ffmpeg stdin was closed".to_owned()))?;
+    feed_ffmpeg(child, |stdin| {
         write_frame(&first, stdin)?;
         while let Ok(frame) = rx.recv() {
             write_frame(&frame, stdin)?;
         }
-    }
-    let output = child
-        .wait_with_output()
-        .map_err(|err| RecordError::Backend(err.to_string()))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        Ok(())
+    })
+}
+
+/// Run `write` against ffmpeg's stdin, then close it and wait for ffmpeg.
+///
+/// stderr is drained on its own thread. ffmpeg logs progress there, and a full
+/// pipe would block it and, in turn, the frame writes.
+fn feed_ffmpeg(
+    mut child: std::process::Child,
+    write: impl FnOnce(&mut std::process::ChildStdin) -> Result<(), RecordError>,
+) -> Result<(), RecordError> {
+    let stderr = child.stderr.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut text = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut pipe, &mut text);
+            text
+        })
+    });
+    let written = match child.stdin.take() {
+        Some(mut stdin) => write(&mut stdin),
+        None => Err(RecordError::Backend("ffmpeg stdin was closed".to_owned())),
+    };
+    let status = child.wait();
+    let stderr = stderr
+        .and_then(|handle| handle.join().ok())
+        .unwrap_or_default();
+    let status = status.map_err(|err| RecordError::Backend(err.to_string()))?;
+    if !status.success() {
+        let stderr = String::from_utf8_lossy(&stderr);
         return Err(RecordError::Backend(format!(
-            "ffmpeg exited with {}: {stderr}",
-            output.status
+            "ffmpeg exited with {status}: {stderr}"
         )));
     }
-    Ok(())
+    written
 }
 
 /// Encode `frames` as a GIF with gifski quality 90.
@@ -376,25 +396,48 @@ pub fn encode_gif(frames: &[Image], fps: u32, out: &Path) -> Result<(), RecordEr
     })
     .map_err(|err| RecordError::Backend(err.to_string()))?;
 
-    let step = 1.0 / f64::from(fps.max(1));
-    for (index, frame) in frames.iter().enumerate() {
-        if frame.width != width || frame.height != height {
-            return Err(RecordError::Backend(
-                "frames in one recording must share a size".to_owned(),
-            ));
-        }
-        let pixels = rgba_pixels(&frame.rgba);
-        let image = imgref::Img::new(pixels, width as usize, height as usize);
-        collector
-            .add_frame_rgba(index, image, index as f64 * step)
-            .map_err(|err| RecordError::Backend(err.to_string()))?;
+    if frames
+        .iter()
+        .any(|frame| frame.width != width || frame.height != height)
+    {
+        return Err(RecordError::Backend(
+            "frames in one recording must share a size".to_owned(),
+        ));
     }
+    let step = 1.0 / f64::from(fps.max(1));
+    let writing = spawn_gif_writer(writer, out)?;
+    let added = frames
+        .iter()
+        .enumerate()
+        .try_for_each(|(index, frame)| add_gif_frame(&collector, index, frame, step));
     drop(collector);
+    join_gif_writer(writing)?;
+    added
+}
+
+/// gifski's collector blocks once its small queue is full, so the writer has
+/// to drain it on another thread while frames are added.
+fn spawn_gif_writer(
+    writer: gifski::Writer,
+    out: &Path,
+) -> Result<std::thread::JoinHandle<Result<(), RecordError>>, RecordError> {
     let file = std::fs::File::create(out).map_err(|err| RecordError::Backend(err.to_string()))?;
-    writer
-        .write(file, &mut KeepGoing)
-        .map_err(|err| RecordError::Backend(err.to_string()))?;
-    Ok(())
+    std::thread::Builder::new()
+        .name("snapper-record-gif".to_owned())
+        .spawn(move || {
+            writer
+                .write(file, &mut KeepGoing)
+                .map_err(|err| RecordError::Backend(err.to_string()))
+        })
+        .map_err(|err| RecordError::Backend(err.to_string()))
+}
+
+fn join_gif_writer(
+    writing: std::thread::JoinHandle<Result<(), RecordError>>,
+) -> Result<(), RecordError> {
+    writing
+        .join()
+        .map_err(|_| RecordError::Backend("the GIF writer thread panicked".to_owned()))?
 }
 
 struct KeepGoing;
@@ -457,7 +500,7 @@ pub fn encode_mp4(
         return Err(RecordError::MissingFfmpeg);
     }
     let (width, height, _) = pad_even(&frames[0]);
-    let mut child = std::process::Command::new(ffmpeg_path)
+    let child = std::process::Command::new(ffmpeg_path)
         .args(ffmpeg_args(width, height, fps, out))
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
@@ -470,11 +513,7 @@ pub fn encode_mp4(
                 RecordError::Backend(err.to_string())
             }
         })?;
-    {
-        let stdin = child
-            .stdin
-            .as_mut()
-            .ok_or_else(|| RecordError::Backend("ffmpeg stdin was closed".to_owned()))?;
+    feed_ffmpeg(child, |stdin| {
         for frame in frames {
             let owned;
             let raw = if frame.width == width && frame.height == height {
@@ -486,18 +525,8 @@ pub fn encode_mp4(
             std::io::Write::write_all(stdin, raw)
                 .map_err(|err| RecordError::Backend(err.to_string()))?;
         }
-    }
-    let output = child
-        .wait_with_output()
-        .map_err(|err| RecordError::Backend(err.to_string()))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(RecordError::Backend(format!(
-            "ffmpeg exited with {}: {stderr}",
-            output.status
-        )));
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 /// yuv420p wants even dimensions. Extra rows and columns are transparent black.
@@ -646,6 +675,22 @@ mod tests {
         assert!(meta.len() > 16, "gif was {}", meta.len());
         let header = std::fs::read(&path).expect("read");
         assert!(header.starts_with(b"GIF"), "header {:?}", &header[..6]);
+    }
+
+    #[test]
+    fn gif_with_more_frames_than_the_gifski_queue_finishes() {
+        let dir = tempfile::tempdir().expect("temp");
+        let path = dir.path().join("long.gif");
+        let frames = (0..40u8)
+            .map(|n| frame(16, 16, [n * 6, 10, 255 - n * 6, 255]))
+            .collect::<Vec<_>>();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(encode_gif(&frames, 15, &path));
+        });
+        rx.recv_timeout(Duration::from_secs(60))
+            .expect("encode_gif did not finish")
+            .expect("gif");
     }
 
     #[test]

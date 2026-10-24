@@ -140,8 +140,8 @@ trait Effects {
     fn copy(&self, image: &Image) -> Result<(), String>;
     fn notify_saved(&self, path: &Path) -> Result<(), String>;
     fn notify_error(&self, message: &str);
-    fn redact(&self, image: &Image) -> Image {
-        image.clone()
+    fn redact(&self, image: &Image) -> Result<Image, String> {
+        Ok(image.clone())
     }
     fn upload(
         &self,
@@ -180,14 +180,8 @@ impl Effects for LiveEffects {
         }
     }
 
-    fn redact(&self, image: &Image) -> Image {
-        match crate::redact::recognise_and_apply(image) {
-            Ok(image) => image,
-            Err(err) => {
-                self.notify_error(&format!("redaction skipped: {err}"));
-                image.clone()
-            }
-        }
+    fn redact(&self, image: &Image) -> Result<Image, String> {
+        crate::redact::recognise_and_apply(image)
     }
 
     fn upload(
@@ -242,10 +236,28 @@ fn run_steps(
         saved: None,
         url: None,
     };
+    let mut redaction_failed = false;
     for step in steps {
+        // After a failed redaction the image may still hold secrets, so it is
+        // only saved locally, never copied or uploaded.
+        if redaction_failed
+            && matches!(
+                step,
+                OutputStep::Clipboard | OutputStep::Upload(_) | OutputStep::CopyLink(_)
+            )
+        {
+            continue;
+        }
         if let Err(err) = apply_step(step, &job, &mut working, &mut result) {
             tracing::error!(step = ?step, error = %err, "output step failed");
-            effects.notify_error(&err);
+            if matches!(step, OutputStep::Redact) {
+                redaction_failed = true;
+                effects.notify_error(&format!(
+                    "redaction failed, so the image was not copied or uploaded: {err}"
+                ));
+            } else {
+                effects.notify_error(&err);
+            }
         }
     }
     result
@@ -259,7 +271,7 @@ fn apply_step(
 ) -> Result<(), String> {
     match step {
         OutputStep::Redact => {
-            *image = job.effects.redact(image);
+            *image = job.effects.redact(image)?;
             Ok(())
         }
         OutputStep::Clipboard => job.effects.copy(image),
@@ -396,8 +408,21 @@ pub fn save_image(
     std::fs::create_dir_all(&settings.directory)
         .map_err(|err| format!("could not create {}: {err}", settings.directory.display()))?;
     let stem = file_stem(&settings.filename_template, ctx);
-    let path = template::unique_path(&settings.directory, &stem, extension(settings.format));
-    if let Err(err) = encode_file(&path, image, settings) {
+    // `create_new` claims the name, so two saves in the same second cannot
+    // both pick it.
+    let (path, file) = loop {
+        let path = template::unique_path(&settings.directory, &stem, extension(settings.format));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => break (path, file),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(format!("could not create {}: {err}", path.display())),
+        }
+    };
+    if let Err(err) = encode_file(file, image, settings) {
         let _ = std::fs::remove_file(&path);
         return Err(err);
     }
@@ -422,8 +447,11 @@ fn extension(format: ImageFormat) -> &'static str {
     }
 }
 
-fn encode_file(path: &Path, image: &Image, settings: &OutputSettings) -> Result<(), String> {
-    let file = std::fs::File::create(path).map_err(|err| err.to_string())?;
+fn encode_file(
+    file: std::fs::File,
+    image: &Image,
+    settings: &OutputSettings,
+) -> Result<(), String> {
     match settings.format {
         ImageFormat::Png => {
             let encoder =
@@ -464,7 +492,7 @@ fn jpeg_quality(value: u8) -> u8 {
 
 fn rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
     let mut rgb = Vec::with_capacity(rgba.len() / 4 * 3);
-    for pixel in rgba.as_chunks::<4>().0 {
+    for pixel in rgba.chunks_exact(4) {
         rgb.extend_from_slice(&pixel[..3]);
     }
     rgb
@@ -770,6 +798,57 @@ mod tests {
         let errors = effects.errors.lock().expect("errors");
         assert!(errors.iter().any(|err| err.contains("s3")));
         assert_eq!(effects.notes.lock().expect("notes").len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    struct FailingRedact(Record);
+
+    impl Effects for FailingRedact {
+        fn copy(&self, image: &Image) -> Result<(), String> {
+            self.0.copy(image)
+        }
+
+        fn notify_saved(&self, path: &Path) -> Result<(), String> {
+            self.0.notify_saved(path)
+        }
+
+        fn notify_error(&self, message: &str) {
+            self.0.notify_error(message);
+        }
+
+        fn redact(&self, _image: &Image) -> Result<Image, String> {
+            Err("no OCR engine".to_owned())
+        }
+
+        fn upload(
+            &self,
+            _target: &str,
+            _bytes: &[u8],
+            _name: &str,
+            _mime: &str,
+            _settings: &Settings,
+        ) -> Result<snapper_upload::UploadResult, String> {
+            panic!("an unredacted image was uploaded");
+        }
+    }
+
+    #[test]
+    fn a_failed_redaction_saves_but_does_not_copy_or_upload() {
+        let dir = scratch("redact");
+        let image = pixel();
+        let ctx = fixed_ctx(&image);
+        let mut prefs = settings(dir.clone(), ImageFormat::Png, true);
+        prefs.output.auto_redact = true;
+        let steps = OutputPipeline::from_settings(&prefs.output, Some("s3".to_owned()))
+            .steps()
+            .to_vec();
+        let effects = FailingRedact(Record::new());
+        let result = run_steps(&steps, &image, &ctx, &prefs, &effects);
+        assert!(result.saved.is_some());
+        assert_eq!(result.url, None);
+        assert!(!*effects.0.copied.lock().expect("copied"));
+        let errors = effects.0.errors.lock().expect("errors");
+        assert!(errors.iter().any(|err| err.contains("redaction failed")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

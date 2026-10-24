@@ -17,3 +17,7 @@ OCR uses the Vision framework (`VNRecognizeTextRequest`, accurate level). It sta
 Recording captures frames through the same screenshot backend. ScreenCaptureKit is not linked. MP4 needs `ffmpeg` on `PATH`. GIF does not.
 
 Scrolling capture sends a mouse wheel event with `enigo` after each frame. Grant Accessibility permission if macOS blocks synthetic input.
+
+## Retina displays
+
+macOS reports display and window bounds in points. Snapper converts them to physical pixels with each display's scale factor, so a Retina display captures at full resolution. A layout that mixes Retina and non-Retina displays is not supported yet: the converted display rectangles can overlap.

@@ -60,7 +60,16 @@ impl S3Target {
                 "the presigned URL contained the secret access key".to_owned(),
             ));
         }
-        Ok((signed.to_string(), public_url(&self.public_base_url, &key)))
+        let public = if self.public_base_url.trim().is_empty() {
+            let mut object = bucket
+                .object_url(&key)
+                .map_err(|err| UploadError::Config(err.to_string()))?;
+            object.set_query(None);
+            object.to_string()
+        } else {
+            public_url(&self.public_base_url, &key)
+        };
+        Ok((signed.to_string(), public))
     }
 }
 
@@ -83,7 +92,7 @@ impl UploadTarget for S3Target {
             .body(bytes)
             .send()
             .await
-            .map_err(|err| UploadError::Network(err.to_string()))?;
+            .map_err(|err| UploadError::Network(err.without_url().to_string()))?;
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();

@@ -46,10 +46,13 @@ impl UploadTarget for ImgurTarget {
             .await
             .map_err(|err| UploadError::Network(err.to_string()))?;
         let status = response.status().as_u16();
-        let body: serde_json::Value = response
-            .json()
+        let text = response
+            .text()
             .await
             .map_err(|err| UploadError::Network(err.to_string()))?;
+        let Ok(body) = serde_json::from_str::<serde_json::Value>(&text) else {
+            return Err(UploadError::Rejected(format!("{status}: {text}")));
+        };
         parse_imgur(status, &body)
     }
 }
