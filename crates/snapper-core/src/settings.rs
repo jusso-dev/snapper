@@ -355,6 +355,30 @@ impl Settings {
         Self::load_from(&config_path())
     }
 
+    /// Load settings from `path`, falling back to defaults when it cannot be
+    /// read or parsed.
+    ///
+    /// The unreadable file is first copied to `<name>.bad` beside it, because
+    /// the next save replaces it. The message describes what happened.
+    pub fn load_or_set_aside(path: &Path) -> (Self, Option<String>) {
+        match Self::load_from(path) {
+            Ok(settings) => (settings, None),
+            Err(err) => {
+                let mut backup = path.as_os_str().to_owned();
+                backup.push(".bad");
+                let backup = PathBuf::from(backup);
+                let message = match std::fs::copy(path, &backup) {
+                    Ok(_) => format!(
+                        "settings could not be read ({err}). Defaults are in use, and the old file was copied to {}.",
+                        backup.display()
+                    ),
+                    Err(_) => format!("settings could not be read ({err}). Defaults are in use."),
+                };
+                (Self::default(), Some(message))
+            }
+        }
+    }
+
     /// Write settings to [`config_path`], creating parent directories.
     pub fn save(&self) -> Result<(), SettingsError> {
         self.save_to(&config_path())
@@ -581,6 +605,20 @@ mod tests {
         let loaded: Settings = toml::from_str(&text).expect("parse");
         assert_eq!(loaded.uploads, settings.uploads);
         assert_eq!(loaded.workflows, settings.workflows);
+    }
+
+    #[test]
+    fn an_unreadable_config_is_copied_aside_before_defaults_are_used() {
+        let dir = tempfile::tempdir().expect("temp");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "uploads = 'not a list'\n").expect("write");
+        let (settings, problem) = Settings::load_or_set_aside(&path);
+        assert_eq!(settings, Settings::default());
+        assert!(problem.expect("message").contains("config.toml.bad"));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("config.toml.bad")).expect("backup"),
+            "uploads = 'not a list'\n"
+        );
     }
 
     #[test]

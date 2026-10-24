@@ -29,6 +29,7 @@ impl UploadTarget for HttpTarget<'_> {
         bytes: Vec<u8>,
         mime: &str,
     ) -> Result<UploadResult, UploadError> {
+        let timeout = crate::upload_timeout(bytes.len());
         let part = reqwest::multipart::Part::bytes(bytes)
             .file_name(name.to_owned())
             .mime_str(mime)
@@ -38,7 +39,10 @@ impl UploadTarget for HttpTarget<'_> {
             .method
             .parse::<reqwest::Method>()
             .map_err(|err| UploadError::Config(err.to_string()))?;
-        let mut request = http_client()?.request(method, &self.url).multipart(form);
+        let mut request = http_client()?
+            .request(method, resolve_header(&self.id, &self.url, self.secrets)?)
+            .multipart(form)
+            .timeout(timeout);
         for header in &self.headers {
             let value = resolve_header(&self.id, &header.value, self.secrets)?;
             request = request.header(header.name.as_str(), value);
@@ -75,8 +79,9 @@ impl UploadTarget for HttpTarget<'_> {
     }
 }
 
-/// A `keyring:` value may only name this target's own `http:{id}:` accounts,
-/// so an imported config cannot send another target's secret to its host.
+/// Resolve a header value or the URL. A `keyring:` value may only name this
+/// target's own `http:{id}:` accounts, so an imported config cannot send
+/// another target's secret to its host.
 pub(crate) fn resolve_header(
     id: &str,
     value: &str,
@@ -85,7 +90,7 @@ pub(crate) fn resolve_header(
     if let Some(account) = value.strip_prefix("keyring:") {
         if !account.starts_with(&format!("http:{id}:")) {
             return Err(UploadError::Config(format!(
-                "header secret {account} does not belong to target {id}"
+                "secret {account} does not belong to target {id}"
             )));
         }
         secrets.get(account)
@@ -120,13 +125,14 @@ mod tests {
     use super::*;
     use crate::MemorySecretStore;
     use snapper_core::settings::HeaderSetting;
-    use wiremock::matchers::{header, method};
+    use wiremock::matchers::{header, method, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[tokio::test]
     async fn http_upload_reads_a_json_pointer_and_a_keychain_header() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
+            .and(query_param("key", "from-keychain-url"))
             .and(header("Authorization", "Bearer from-keychain"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "data": { "link": "https://cdn.example/a.png", "delete": "https://cdn.example/a.png/delete" }
@@ -138,9 +144,15 @@ mod tests {
         secrets
             .set("http:custom:Authorization", "Bearer from-keychain")
             .expect("store");
+        secrets
+            .set(
+                "http:custom:RequestURL",
+                &format!("{}/upload?key=from-keychain-url", server.uri()),
+            )
+            .expect("store");
         let target = HttpTarget {
             id: "custom".to_owned(),
-            url: server.uri(),
+            url: "keyring:http:custom:RequestURL".to_owned(),
             method: "POST".to_owned(),
             file_field: "file".to_owned(),
             headers: vec![HeaderSetting {

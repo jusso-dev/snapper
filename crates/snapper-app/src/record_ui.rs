@@ -178,8 +178,7 @@ fn scale(monitor: &MonitorInfo) -> f32 {
 fn points_to_physical(monitors: &[MonitorInfo], x: i32, y: i32) -> Option<(i32, i32)> {
     monitors.iter().find_map(|monitor| {
         let scale = scale(monitor);
-        let left = monitor.rect.x as f32 / scale;
-        let top = monitor.rect.y as f32 / scale;
+        let (left, top) = monitor.logical_origin;
         let (x, y) = (x as f32, y as f32);
         let inside = x >= left
             && y >= top
@@ -202,9 +201,14 @@ fn logical_region(monitors: &[MonitorInfo], region: Rect) -> (f32, f32, f32) {
             && region.x < monitor.rect.x + monitor.rect.width as i32
             && region.y < monitor.rect.y + monitor.rect.height as i32
     });
-    let scale = monitor.map_or(1.0, scale);
-    let left = region.x as f32 / scale;
-    let top = region.y as f32 / scale;
+    let Some(monitor) = monitor else {
+        let (left, top) = (region.x as f32, region.y as f32);
+        return (left, top, top + region.height as f32);
+    };
+    let scale = scale(monitor);
+    let (origin_x, origin_y) = monitor.logical_origin;
+    let left = origin_x + (region.x - monitor.rect.x) as f32 / scale;
+    let top = origin_y + (region.y - monitor.rect.y) as f32 / scale;
     (left, top, top + region.height as f32 / scale)
 }
 

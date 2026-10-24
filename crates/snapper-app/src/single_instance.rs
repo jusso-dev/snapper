@@ -4,13 +4,15 @@
 //! launch connects, sends its CLI arguments as one JSON line, and exits 0.
 //! The primary reads that line from [`serve`].
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 
 use interprocess::local_socket::traits::Listener as _;
 use interprocess::local_socket::{
     prelude::*, GenericNamespaced, Listener, ListenerOptions, Name, Stream,
 };
 use serde::{Deserialize, Serialize};
+
+const MAX_FORWARD_BYTES: u64 = 64 * 1024;
 
 /// Result of trying to become the resident process.
 pub enum Claim {
@@ -67,10 +69,13 @@ fn socket_is_taken(err: &std::io::Error) -> bool {
 pub fn serve(listener: Listener, tx: std::sync::mpsc::Sender<Vec<String>>) {
     loop {
         match listener.accept() {
+            // Each connection is read on its own thread, so a client that
+            // connects and never writes cannot block later launches.
             Ok(stream) => {
-                if tx.send(read_forward(stream)).is_err() {
-                    break;
-                }
+                let tx = tx.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(read_forward(stream));
+                });
             }
             Err(err) => {
                 tracing::warn!(error = %err, "single-instance listener failed");
@@ -82,7 +87,8 @@ pub fn serve(listener: Listener, tx: std::sync::mpsc::Sender<Vec<String>>) {
 
 fn read_forward(stream: Stream) -> Vec<String> {
     let mut line = String::new();
-    let mut reader = BufReader::new(stream);
+    // One argument list is small; a longer line is not from Snapper.
+    let mut reader = BufReader::new(stream).take(MAX_FORWARD_BYTES);
     match reader.read_line(&mut line) {
         Ok(_) => decode_args(&line).unwrap_or_default(),
         Err(err) => {

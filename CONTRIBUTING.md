@@ -4,7 +4,7 @@ Thanks for helping with Snapper. Issues and pull requests are welcome.
 
 ## Setup
 
-Install Rust with the stable toolchain in `rust-toolchain.toml` (1.80 or newer, plus rustfmt and clippy). From the repository root:
+Install Rust with the stable toolchain in `rust-toolchain.toml` (1.81 or newer, plus rustfmt and clippy). From the repository root:
 
 ```sh
 cargo test --workspace

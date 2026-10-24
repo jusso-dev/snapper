@@ -224,7 +224,8 @@ impl ToolSession {
         let item = self.item(Shape::Text {
             at: draft.at,
             text: text.to_string(),
-            size: 18.0,
+            // 18 logical points, so text reads the same size on a Retina capture.
+            size: 18.0 * self.scale,
         });
         self.selected = Some(item.id);
         Some(Edit::Add(item))
@@ -236,7 +237,7 @@ impl ToolSession {
         self.selected = None;
         self.gesture = None;
         self.live = None;
-        Some(Edit::Remove(item))
+        Some(Edit::remove(item))
     }
 
     pub fn cancel(&mut self) {
@@ -621,7 +622,9 @@ fn resize_item(item: &Item, handle: Handle, point: Point) -> Item {
             }
         }
         Shape::Text { at, text, .. } => {
-            let size = (point.x - at.x).abs().max(8.0);
+            // Pick the size whose box reaches the pointer, so the handle stays under it.
+            let per_size = snapper_editor::text_bounds(*at, text, 1.0).width;
+            let size = ((point.x - at.x).abs() / per_size).max(8.0);
             Shape::Text {
                 at: *at,
                 text: text.clone(),
@@ -717,12 +720,7 @@ fn item_bounds(item: &Item) -> Option<RectF> {
         | Shape::Highlight { rect }
         | Shape::Blur { rect, .. }
         | Shape::Pixelate { rect, .. } => Some(*rect),
-        Shape::Text { at, text, size } => Some(RectF {
-            x: at.x,
-            y: at.y,
-            width: text.chars().count() as f32 * size.abs() * 0.6,
-            height: size.abs(),
-        }),
+        Shape::Text { at, text, size } => Some(snapper_editor::text_bounds(*at, text, *size)),
         _ => None,
     }
 }
@@ -1206,5 +1204,24 @@ mod tests {
         });
         assert!(edit.is_none());
         assert!(tools.display_items().is_empty());
+    }
+
+    #[test]
+    fn text_resize_keeps_the_handle_under_the_pointer() {
+        let item = Item {
+            id: 1,
+            shape: Shape::Text {
+                at: Point { x: 10.0, y: 10.0 },
+                text: "abc".into(),
+                size: 10.0,
+            },
+            style: Style::default(),
+            auto: false,
+        };
+        let resized = resize_item(&item, Handle::SouthEast, Point { x: 40.0, y: 30.0 });
+        let rect = item_bounds(&resized).expect("bounds");
+        assert!((rect.x + rect.width - 40.0).abs() < 0.01);
+        let again = resize_item(&resized, Handle::SouthEast, Point { x: 40.0, y: 30.0 });
+        assert_eq!(item_bounds(&again), Some(rect));
     }
 }

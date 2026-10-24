@@ -15,8 +15,8 @@ use snapper_capture::{window_at, MonitorInfo, WindowInfo};
 use snapper_core::{Image, Rect};
 
 use geometry::{
-    clamp_rect, hit_resize_handle, nudge, physical_to_local, rect_from_points, resize_rect,
-    scale_of, union_rect, ResizeHandle,
+    clamp_rect, hit_resize_handle, logical_origin, logical_size, nudge, physical_to_local,
+    rect_from_points, resize_rect, scale_of, union_rect, ResizeHandle,
 };
 
 /// What the overlay hands back to the caller.
@@ -78,7 +78,11 @@ impl OverlayState {
         }
     }
 
-    /// Physical pixel under the local logical pointer, if it lands on a monitor.
+    /// Physical pixel under the local logical pointer.
+    ///
+    /// A drag keeps reporting to the viewport it started in, so a point past
+    /// that monitor's edge is converted with the monitor it is really over.
+    /// Its scale can differ.
     pub fn physical_at(
         &self,
         monitor_index: usize,
@@ -86,7 +90,23 @@ impl OverlayState {
         local_y: f32,
     ) -> Option<(i32, i32)> {
         let monitor = self.monitors.get(monitor_index)?;
-        Some(logical_to_physical(monitor, local_x, local_y))
+        let (width, height) = logical_size(monitor);
+        if local_x >= 0.0 && local_y >= 0.0 && local_x < width && local_y < height {
+            return Some(logical_to_physical(monitor, local_x, local_y));
+        }
+        let (origin_x, origin_y) = logical_origin(monitor);
+        let (x, y) = (origin_x + local_x, origin_y + local_y);
+        let under = self
+            .monitors
+            .iter()
+            .find(|candidate| {
+                let (left, top) = logical_origin(candidate);
+                let (width, height) = logical_size(candidate);
+                x >= left && y >= top && x < left + width && y < top + height
+            })
+            .unwrap_or(monitor);
+        let (left, top) = logical_origin(under);
+        Some(logical_to_physical(under, x - left, y - top))
     }
 
     pub fn pointer_down(&mut self, monitor_index: usize, local_x: f32, local_y: f32) {
@@ -291,6 +311,7 @@ mod tests {
             },
             scale_factor: scale,
             is_primary: id == 1,
+            logical_origin: (x as f32 / scale, y as f32 / scale),
         }
     }
 
@@ -411,6 +432,30 @@ mod tests {
         overlay.pointer_down(0, 40.0, 40.0);
         overlay.pointer_moved(0, 60.0, 50.0);
         assert_eq!(overlay.highlight_window(0, 12.0, 12.0), None);
+    }
+
+    #[test]
+    fn a_drag_past_the_edge_uses_the_next_monitor_scale() {
+        let overlay = OverlayState::new(
+            Image {
+                width: 1,
+                height: 1,
+                scale_factor: 1.0,
+                rgba: vec![0; 4],
+            },
+            vec![
+                monitor(1, 0, 0, 1920, 1080, 1.0),
+                // A 2x display placed right of it at 1920 points, as on macOS.
+                MonitorInfo {
+                    logical_origin: (1920.0, 0.0),
+                    ..monitor(2, 3840, 0, 2560, 1440, 2.0)
+                },
+            ],
+            Vec::new(),
+        );
+        // 10 logical points into the 2x monitor, reported by the 1x viewport.
+        assert_eq!(overlay.physical_at(0, 1930.0, 5.0), Some((3860, 10)));
+        assert_eq!(overlay.physical_at(0, 100.0, 5.0), Some((100, 5)));
     }
 
     fn select(overlay: &mut OverlayState, from: (f32, f32), to: (f32, f32)) {

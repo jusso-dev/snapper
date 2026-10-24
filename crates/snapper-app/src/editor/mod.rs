@@ -316,7 +316,7 @@ impl EditorApp {
         });
         if clear {
             for item in autos {
-                self.apply_edit(Edit::Remove(item));
+                self.apply_edit(Edit::remove(item));
             }
         }
     }
@@ -363,7 +363,13 @@ impl EditorApp {
                 );
             }
             for item in self.session.display_items() {
-                paint_item(ui, &item, view, self.session.selected == Some(item.id));
+                paint_item(
+                    ui,
+                    &item,
+                    view,
+                    self.doc.base.scale_factor,
+                    self.session.selected == Some(item.id),
+                );
             }
             if let Some(crop) = self.doc.crop {
                 stroke_image_rect(
@@ -583,7 +589,7 @@ fn stroke_image_rect(ui: &egui::Ui, rect: snapper_editor::RectF, view: View, col
     );
 }
 
-fn paint_item(ui: &egui::Ui, item: &Item, view: View, selected: bool) {
+fn paint_item(ui: &egui::Ui, item: &Item, view: View, scale: f32, selected: bool) {
     let painter = ui.painter();
     let colour = Color32::from_rgba_unmultiplied(
         item.style.stroke.r,
@@ -654,23 +660,24 @@ fn paint_item(ui: &egui::Ui, item: &Item, view: View, selected: bool) {
         }
         Shape::Step { at, n } => {
             let centre = screen(*at);
-            painter.circle_filled(centre, 14.0 * view.zoom, colour);
+            let radius = snapper_editor::step_radius(scale) * view.zoom;
+            painter.circle_filled(centre, radius, colour);
             painter.text(
                 centre,
                 egui::Align2::CENTER_CENTER,
                 n.to_string(),
-                egui::FontId::proportional(14.0 * view.zoom),
+                egui::FontId::proportional(radius),
                 Color32::WHITE,
             );
         }
     }
     if item.auto {
-        if let Some(bounds) = selection_bounds(item) {
+        if let Some(bounds) = selection_bounds(item, scale) {
             dashed_rect(ui, bounds, view, Color32::from_rgb(220, 140, 40));
         }
     }
     if selected {
-        if let Some(bounds) = selection_bounds(item) {
+        if let Some(bounds) = selection_bounds(item, scale) {
             let drawn = Rect::from_min_max(
                 screen(Point {
                     x: bounds.x,
@@ -761,7 +768,7 @@ fn follow_up_note(result: &crate::output::OutputResult) -> output::EditorOutput 
     }
 }
 
-fn selection_bounds(item: &Item) -> Option<snapper_editor::RectF> {
+fn selection_bounds(item: &Item, scale: f32) -> Option<snapper_editor::RectF> {
     match &item.shape {
         Shape::Rect { rect }
         | Shape::Ellipse { rect }
@@ -774,18 +781,16 @@ fn selection_bounds(item: &Item) -> Option<snapper_editor::RectF> {
             width: (from.x - to.x).abs().max(1.0),
             height: (from.y - to.y).abs().max(1.0),
         }),
-        Shape::Text { at, size, .. } => Some(snapper_editor::RectF {
-            x: at.x,
-            y: at.y,
-            width: size * 2.0,
-            height: *size,
-        }),
-        Shape::Step { at, .. } => Some(snapper_editor::RectF {
-            x: at.x - 14.0,
-            y: at.y - 14.0,
-            width: 28.0,
-            height: 28.0,
-        }),
+        Shape::Text { at, text, size } => Some(snapper_editor::text_bounds(*at, text, *size)),
+        Shape::Step { at, .. } => {
+            let radius = snapper_editor::step_radius(scale);
+            Some(snapper_editor::RectF {
+                x: at.x - radius,
+                y: at.y - radius,
+                width: radius * 2.0,
+                height: radius * 2.0,
+            })
+        }
     }
 }
 

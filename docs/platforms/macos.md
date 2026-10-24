@@ -20,4 +20,4 @@ Scrolling capture sends a mouse wheel event with `enigo` after each frame. Grant
 
 ## Retina displays
 
-macOS reports display and window bounds in points. Snapper converts them to physical pixels with each display's scale factor, so a Retina display captures at full resolution. A layout that mixes Retina and non-Retina displays is not supported yet: the converted display rectangles can overlap.
+macOS reports display and window bounds in points. Snapper converts them to physical pixels, so a Retina display captures at full resolution. With displays of different scales, each display's position is multiplied by the largest scale and its size by its own scale. Displays never overlap in that layout, and a full-desktop capture shows black gaps beside the lower-scale displays.

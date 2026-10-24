@@ -66,6 +66,7 @@ fn monitor_from_image(image: &Image) -> MonitorInfo {
         },
         scale_factor: image.scale_factor,
         is_primary: true,
+        logical_origin: (0.0, 0.0),
     }
 }
 

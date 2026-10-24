@@ -231,7 +231,7 @@ fn luhn(number: &str) -> bool {
         }
         sum += value;
     }
-    // `is_multiple_of` arrived after the 1.80 rust-version in Cargo.toml.
+    // `is_multiple_of` arrived after the 1.81 rust-version in Cargo.toml.
     #[allow(clippy::manual_is_multiple_of)]
     {
         sum % 10 == 0

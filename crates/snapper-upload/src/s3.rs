@@ -86,9 +86,11 @@ impl UploadTarget for S3Target {
         mime: &str,
     ) -> Result<UploadResult, UploadError> {
         let (signed, public) = self.presign(name)?;
+        let timeout = crate::upload_timeout(bytes.len());
         let response = http_client()?
             .put(&signed)
             .header("content-type", mime)
+            .timeout(timeout)
             .body(bytes)
             .send()
             .await

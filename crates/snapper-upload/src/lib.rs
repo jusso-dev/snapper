@@ -157,10 +157,16 @@ pub(crate) fn http_client() -> Result<reqwest::Client, UploadError> {
     // and reqwest only strips `Authorization` and `Cookie` on a cross-host hop.
     reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
-        .timeout(std::time::Duration::from_secs(120))
+        .read_timeout(std::time::Duration::from_secs(60))
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|err| UploadError::Network(err.to_string()))
+}
+
+/// Total time allowed for one upload: a minute, plus a second for every 64 KiB,
+/// so a large scroll capture on a slow link is not cut off.
+pub(crate) fn upload_timeout(bytes: usize) -> std::time::Duration {
+    std::time::Duration::from_secs(60 + (bytes / (64 * 1024)) as u64)
 }
 
 /// Join a prefix and a file name with single slashes.

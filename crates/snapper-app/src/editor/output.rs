@@ -44,7 +44,7 @@ pub fn perform(request: OutputRequest, doc: &Document, settings: &Settings) -> E
         },
         OutputRequest::Save => {
             let ctx = output::context_for(&image);
-            let result = output::run(&image, &ctx, settings);
+            let result = output::run_with(&save_steps(settings), &image, &ctx, settings);
             saved_note(&result)
         }
         OutputRequest::Upload => {
@@ -74,6 +74,17 @@ pub fn perform(request: OutputRequest, doc: &Document, settings: &Settings) -> E
     }
 }
 
+/// The default output steps without automatic redaction. The user has already
+/// reviewed the document, so redaction boxes they removed must stay removed.
+fn save_steps(settings: &Settings) -> Vec<output::OutputStep> {
+    output::OutputPipeline::from_settings(&settings.output, None)
+        .steps()
+        .iter()
+        .filter(|step| !matches!(step, output::OutputStep::Redact))
+        .cloned()
+        .collect()
+}
+
 fn saved_note(result: &OutputResult) -> EditorOutput {
     match &result.saved {
         Some(path) => {
@@ -90,5 +101,19 @@ fn saved_note(result: &OutputResult) -> EditorOutput {
             note: "Not saved".to_owned(),
             saved: false,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn save_does_not_redact_again() {
+        let mut settings = Settings::default();
+        settings.output.auto_redact = true;
+        let steps = save_steps(&settings);
+        assert!(!steps.contains(&output::OutputStep::Redact));
+        assert!(steps.contains(&output::OutputStep::Save));
     }
 }

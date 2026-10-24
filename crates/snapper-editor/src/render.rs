@@ -267,7 +267,7 @@ fn draw_vectors(pixmap: &mut Pixmap, items: &[Item], scale: f32) {
                 }
             }
             Shape::Step { at, .. } => {
-                let radius = 14.0 * scale;
+                let radius = crate::step_radius(scale);
                 if let Some(path) = circle_path(*at, radius) {
                     let mut style = item.style;
                     style.fill = Some(item.style.fill.unwrap_or(item.style.stroke));
@@ -475,7 +475,7 @@ fn draw_labels(pixels: &mut [u8], width: u32, height: u32, items: &[Item], scale
                 );
             }
             Shape::Step { at, n } => {
-                let radius = 14.0 * scale;
+                let radius = crate::step_radius(scale);
                 let label = n.to_string();
                 let size = match label.chars().count() {
                     1 => radius * 1.25,

@@ -33,6 +33,7 @@ impl UploadTarget for ImgurTarget {
         bytes: Vec<u8>,
         mime: &str,
     ) -> Result<UploadResult, UploadError> {
+        let timeout = crate::upload_timeout(bytes.len());
         let part = reqwest::multipart::Part::bytes(bytes)
             .file_name(name.to_owned())
             .mime_str(mime)
@@ -42,9 +43,10 @@ impl UploadTarget for ImgurTarget {
             .post(&self.endpoint)
             .header("Authorization", format!("Client-ID {}", self.client_id))
             .multipart(form)
+            .timeout(timeout)
             .send()
             .await
-            .map_err(|err| UploadError::Network(err.to_string()))?;
+            .map_err(|err| UploadError::Network(err.without_url().to_string()))?;
         let status = response.status().as_u16();
         let text = response
             .text()

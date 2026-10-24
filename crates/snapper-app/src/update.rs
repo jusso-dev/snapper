@@ -76,7 +76,7 @@ pub fn check_quiet() -> Result<(), UpdateError> {
         std::env::var("SNAPPER_UPDATE_URL").unwrap_or_else(|_| DEFAULT_MANIFEST_URL.to_owned());
     let (manifest, signature) = fetch(&url)?;
     let release = verify_and_parse(&manifest, &signature, BUNDLED_PUBLIC_KEY)?;
-    if release.version != snapper_core::version() && !release.version.is_empty() {
+    if is_newer(&release.version, snapper_core::version()) {
         crate::output::notify(
             "Snapper",
             &format!(
@@ -88,9 +88,49 @@ pub fn check_quiet() -> Result<(), UpdateError> {
     Ok(())
 }
 
+/// True when `candidate` is a later `major.minor.patch` than `current`.
+///
+/// A pre-release such as `1.2.0-beta.1` is older than `1.2.0`. A version that
+/// does not parse is never newer, so a bad manifest cannot nag.
+fn is_newer(candidate: &str, current: &str) -> bool {
+    fn parse(version: &str) -> Option<([u64; 3], bool)> {
+        let version = version.trim().trim_start_matches('v');
+        let version = version.split('+').next()?;
+        let (core, pre) = match version.split_once('-') {
+            Some((core, _)) => (core, true),
+            None => (version, false),
+        };
+        let mut parts = [0u64; 3];
+        let mut count = 0;
+        for part in core.split('.') {
+            *parts.get_mut(count)? = part.parse().ok()?;
+            count += 1;
+        }
+        (count > 0).then_some((parts, pre))
+    }
+    match (parse(candidate), parse(current)) {
+        (Some((new, new_pre)), Some((old, old_pre))) => {
+            new > old || (new == old && old_pre && !new_pre)
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_later_version_is_newer() {
+        assert!(is_newer("0.0.2", "0.0.1"));
+        assert!(is_newer("0.10.0", "0.9.9"));
+        assert!(is_newer("v1.0.0", "1.0.0-rc.1"));
+        assert!(!is_newer("0.0.1", "0.0.2"));
+        assert!(!is_newer("1.0.0", "1.0.0"));
+        assert!(!is_newer("1.0.0-rc.1", "1.0.0"));
+        assert!(!is_newer("", "1.0.0"));
+        assert!(!is_newer("latest", "1.0.0"));
+    }
 
     fn sign(message: &str) -> (String, String) {
         let keypair = minisign::KeyPair::generate_unencrypted_keypair().expect("keypair");

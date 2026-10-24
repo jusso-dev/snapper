@@ -30,8 +30,7 @@ pub fn scale_of(monitor: &MonitorInfo) -> f32 {
 
 /// Top-left of the monitor in logical pixels, for placing its viewport.
 pub fn logical_origin(monitor: &MonitorInfo) -> (f32, f32) {
-    let scale = scale_of(monitor);
-    (monitor.rect.x as f32 / scale, monitor.rect.y as f32 / scale)
+    monitor.logical_origin
 }
 
 /// Viewport size in logical pixels.
@@ -238,6 +237,7 @@ mod tests {
             },
             scale_factor: scale,
             is_primary: id == 1,
+            logical_origin: (x as f32 / scale, y as f32 / scale),
         }
     }
 

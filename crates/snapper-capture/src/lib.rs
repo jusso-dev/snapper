@@ -26,6 +26,10 @@ pub struct MonitorInfo {
     pub rect: Rect,
     pub scale_factor: f32,
     pub is_primary: bool,
+    /// Top-left in the windowing system's logical coordinates, where a
+    /// window covering this monitor is placed. Usually `rect` divided by
+    /// `scale_factor`; on macOS it is the display origin in points.
+    pub logical_origin: (f32, f32),
 }
 
 /// A window the user can capture.

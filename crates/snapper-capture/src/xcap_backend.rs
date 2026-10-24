@@ -31,6 +31,9 @@ impl Capturer for XcapCapturer {
         for monitor in xcap::Monitor::all().map_err(map_xcap_error)? {
             infos.push(monitor_info(&monitor)?);
         }
+        if cfg!(target_os = "macos") {
+            place_points_in_pixels(&mut infos);
+        }
         infos.sort_by(|left, right| {
             left.rect
                 .y
@@ -43,7 +46,11 @@ impl Capturer for XcapCapturer {
 
     fn capture_monitor(&self, id: u32) -> Result<Image, CaptureError> {
         let monitor = self.monitor(id)?;
-        let info = monitor_info(&monitor)?;
+        let info = self
+            .monitors()?
+            .into_iter()
+            .find(|info| info.id == id)
+            .ok_or_else(|| CaptureError::Backend(format!("unknown monitor {id}")))?;
         let captured = monitor.capture_image().map_err(map_xcap_error)?;
         let image = image_from_rgba(captured, info.scale_factor);
         if image.width != info.rect.width || image.height != info.rect.height {
@@ -84,9 +91,17 @@ impl Capturer for XcapCapturer {
         // `xcap` already returns windows front-first. Keep that order so
         // `window_at` hits the top window.
         let own_pid = std::process::id();
+        let monitors = if cfg!(target_os = "macos") {
+            self.monitors()?
+        } else {
+            Vec::new()
+        };
         let mut infos = Vec::new();
         for window in xcap::Window::all().map_err(map_xcap_error)? {
-            if let Some(info) = visible_window(&window, own_pid) {
+            if let Some(mut info) = visible_window(&window, own_pid) {
+                if cfg!(target_os = "macos") {
+                    info.rect = window_points_to_pixels(info.rect, &monitors);
+                }
                 infos.push(info);
             }
         }
@@ -139,16 +154,6 @@ fn visible_window(window: &xcap::Window, own_pid: u32) -> Option<WindowInfo> {
         y: window.y().ok()?,
         width,
         height,
-    };
-    let rect = if cfg!(target_os = "macos") {
-        let scale = window
-            .current_monitor()
-            .ok()
-            .and_then(|monitor| monitor.scale_factor().ok())
-            .unwrap_or(1.0);
-        points_to_pixels(rect, scale)
-    } else {
-        rect
     };
     Some(WindowInfo {
         id: u64::from(window.id().ok()?),
@@ -217,35 +222,76 @@ fn monitor_info(monitor: &xcap::Monitor) -> Result<MonitorInfo, CaptureError> {
         width: monitor.width().map_err(map_xcap_error)?,
         height: monitor.height().map_err(map_xcap_error)?,
     };
+    let safe_scale = if scale_factor.is_finite() && scale_factor > 0.0 {
+        scale_factor
+    } else {
+        1.0
+    };
     Ok(MonitorInfo {
         id,
         name,
-        rect: if cfg!(target_os = "macos") {
-            points_to_pixels(rect, scale_factor)
-        } else {
-            rect
-        },
+        rect,
         scale_factor,
         is_primary: monitor.is_primary().unwrap_or(false),
+        logical_origin: (rect.x as f32 / safe_scale, rect.y as f32 / safe_scale),
     })
 }
 
-/// xcap reports macOS monitor and window bounds in points, but its bitmaps
-/// and the [`MonitorInfo`] and [`WindowInfo`] rects are in physical pixels.
+/// xcap reports macOS monitor and window bounds in points, but its bitmaps and
+/// the [`MonitorInfo`] and [`WindowInfo`] rects are in physical pixels.
 ///
-/// Each origin is scaled by its own display's factor. That keeps a single
-/// display, or displays sharing one scale, consistent; mixing Retina and
-/// non-Retina displays is not supported yet.
-fn points_to_pixels(rect: snapper_core::Rect, scale_factor: f32) -> snapper_core::Rect {
-    if !scale_factor.is_finite() || scale_factor <= 0.0 {
-        return rect;
+/// macOS has no single pixel space across displays with different scales. Each
+/// display's origin is multiplied by the largest scale, and its size by its
+/// own, so displays never overlap; a lower-scale display leaves a gap after
+/// it. `logical_origin` keeps the origin in points for placing windows.
+fn place_points_in_pixels(monitors: &mut [MonitorInfo]) {
+    let largest = monitors
+        .iter()
+        .map(|monitor| safe(monitor.scale_factor))
+        .fold(1.0f64, f64::max);
+    for monitor in monitors {
+        let own = safe(monitor.scale_factor);
+        let points = monitor.rect;
+        monitor.logical_origin = (points.x as f32, points.y as f32);
+        monitor.rect = Rect {
+            x: (f64::from(points.x) * largest).round() as i32,
+            y: (f64::from(points.y) * largest).round() as i32,
+            width: (f64::from(points.width) * own).round() as u32,
+            height: (f64::from(points.height) * own).round() as u32,
+        };
     }
-    let scale = f64::from(scale_factor);
-    snapper_core::Rect {
-        x: (f64::from(rect.x) * scale).round() as i32,
-        y: (f64::from(rect.y) * scale).round() as i32,
-        width: (f64::from(rect.width) * scale).round() as u32,
-        height: (f64::from(rect.height) * scale).round() as u32,
+}
+
+/// A window rect in points to pixels, through the display holding its
+/// top-left corner (or the first display when none does).
+fn window_points_to_pixels(points: Rect, monitors: &[MonitorInfo]) -> Rect {
+    let holds = |monitor: &&MonitorInfo| {
+        let (left, top) = monitor.logical_origin;
+        let scale = safe(monitor.scale_factor) as f32;
+        let (x, y) = (points.x as f32, points.y as f32);
+        x >= left
+            && y >= top
+            && x < left + monitor.rect.width as f32 / scale
+            && y < top + monitor.rect.height as f32 / scale
+    };
+    let Some(monitor) = monitors.iter().find(holds).or_else(|| monitors.first()) else {
+        return points;
+    };
+    let (left, top) = monitor.logical_origin;
+    let scale = safe(monitor.scale_factor);
+    Rect {
+        x: monitor.rect.x + ((f64::from(points.x) - f64::from(left)) * scale).round() as i32,
+        y: monitor.rect.y + ((f64::from(points.y) - f64::from(top)) * scale).round() as i32,
+        width: (f64::from(points.width) * scale).round() as u32,
+        height: (f64::from(points.height) * scale).round() as u32,
+    }
+}
+
+fn safe(scale: f32) -> f64 {
+    if scale.is_finite() && scale > 0.0 {
+        f64::from(scale)
+    } else {
+        1.0
     }
 }
 
@@ -295,25 +341,92 @@ fn is_black(image: &Image) -> bool {
 mod tests {
     use super::*;
 
+    fn display(id: u32, x: i32, y: i32, width: u32, height: u32, scale: f32) -> MonitorInfo {
+        MonitorInfo {
+            id,
+            name: format!("d{id}"),
+            rect: Rect {
+                x,
+                y,
+                width,
+                height,
+            },
+            scale_factor: scale,
+            is_primary: id == 1,
+            logical_origin: (0.0, 0.0),
+        }
+    }
+
     #[test]
     fn retina_points_become_pixels() {
-        let points = Rect {
-            x: -1440,
-            y: 0,
-            width: 1440,
-            height: 900,
-        };
-        let pixels = points_to_pixels(points, 2.0);
+        let mut monitors = [display(1, 0, 0, 1440, 900, 2.0)];
+        place_points_in_pixels(&mut monitors);
         assert_eq!(
-            pixels,
+            monitors[0].rect,
             Rect {
-                x: -2880,
+                x: 0,
                 y: 0,
                 width: 2880,
                 height: 1800,
             }
         );
-        assert_eq!(points_to_pixels(points, 0.0), points);
+        assert_eq!(monitors[0].logical_origin, (0.0, 0.0));
+    }
+
+    #[test]
+    fn mixed_scale_displays_do_not_overlap() {
+        // A 2x laptop with a 1x display to its right and one to its left.
+        let mut monitors = [
+            display(1, 0, 0, 1512, 982, 2.0),
+            display(2, 1512, 0, 1920, 1080, 1.0),
+            display(3, -1920, 0, 1920, 1080, 1.0),
+        ];
+        place_points_in_pixels(&mut monitors);
+        let [laptop, right, left] = &monitors;
+        assert_eq!((laptop.rect.x, laptop.rect.width), (0, 3024));
+        assert_eq!((right.rect.x, right.rect.width), (3024, 1920));
+        assert_eq!((left.rect.x, left.rect.width), (-3840, 1920));
+        assert!(left.rect.x + left.rect.width as i32 <= laptop.rect.x);
+        assert_eq!(right.logical_origin, (1512.0, 0.0));
+    }
+
+    #[test]
+    fn window_points_map_through_their_display() {
+        let mut monitors = [
+            display(1, 0, 0, 1512, 982, 2.0),
+            display(2, 1512, 0, 1920, 1080, 1.0),
+        ];
+        place_points_in_pixels(&mut monitors);
+        let on_laptop = Rect {
+            x: 100,
+            y: 50,
+            width: 400,
+            height: 300,
+        };
+        assert_eq!(
+            window_points_to_pixels(on_laptop, &monitors),
+            Rect {
+                x: 200,
+                y: 100,
+                width: 800,
+                height: 600,
+            }
+        );
+        let on_external = Rect {
+            x: 1612,
+            y: 50,
+            width: 400,
+            height: 300,
+        };
+        assert_eq!(
+            window_points_to_pixels(on_external, &monitors),
+            Rect {
+                x: 3124,
+                y: 50,
+                width: 400,
+                height: 300,
+            }
+        );
     }
 
     #[test]

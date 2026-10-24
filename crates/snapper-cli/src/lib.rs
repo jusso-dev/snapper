@@ -685,6 +685,7 @@ mod tests {
             },
             scale_factor: 2.0,
             is_primary: true,
+            logical_origin: (0.0, 0.0),
         }];
         let text = monitors_json(&monitors);
         let parsed: serde_json::Value = serde_json::from_str(&text).expect("json");

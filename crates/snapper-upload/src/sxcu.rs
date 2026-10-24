@@ -48,6 +48,11 @@ pub fn import_sxcu(
         .and_then(|item| item.as_str())
         .ok_or_else(|| UploadError::Config("sxcu file has no RequestURL".to_owned()))?
         .to_owned();
+    if url.starts_with("keyring:") {
+        return Err(UploadError::Config(
+            "RequestURL refers to a keychain entry".to_owned(),
+        ));
+    }
     let method = value
         .get("RequestMethod")
         .and_then(|item| item.as_str())
@@ -86,6 +91,15 @@ pub fn import_sxcu(
         }
     }
     // Secrets are stored last so a rejected file leaves nothing in the keychain.
+    // Hosts often put an API key in the query string, so a URL with a query
+    // is kept in the keychain too.
+    let url = if url::Url::parse(&url).is_ok_and(|parsed| parsed.query().is_some()) {
+        let account = format!("http:{id}:RequestURL");
+        secrets.set(&account, &url)?;
+        format!("keyring:{account}")
+    } else {
+        url
+    };
     let mut headers = Vec::new();
     for (name, raw) in pending {
         let value = if secret_header(&name, &raw) {
@@ -357,6 +371,24 @@ mod tests {
         assert_eq!(
             secrets.get("http:x:Cookie").expect("secret"),
             "session=hunter2"
+        );
+    }
+
+    #[test]
+    fn sxcu_import_keeps_a_query_string_url_out_of_config() {
+        let dir = tempfile::tempdir().expect("temp");
+        let path = write_sxcu(
+            &dir,
+            r#"{ "Name": "x", "RequestURL": "https://example.com/upload?key=q-secret" }"#,
+        );
+        let secrets = MemorySecretStore::default();
+        let config = import_sxcu(&path, &secrets, &[]).expect("import");
+        let text = toml::to_string(&config).expect("toml");
+        assert!(!text.contains("q-secret"), "{text}");
+        assert!(text.contains("keyring:http:x:RequestURL"), "{text}");
+        assert_eq!(
+            secrets.get("http:x:RequestURL").expect("secret"),
+            "https://example.com/upload?key=q-secret"
         );
     }
 

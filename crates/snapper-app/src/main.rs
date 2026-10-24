@@ -148,23 +148,15 @@ fn spawn_ipc(
 }
 
 /// Settings that fail to load fall back to defaults. The unreadable file is
-/// copied to `config.toml.bad` first, because the next save from the settings
-/// window replaces it.
+/// copied aside first, because the next save from the settings window
+/// replaces it.
 fn load_settings() -> Settings {
-    Settings::load().unwrap_or_else(|err| {
-        eprintln!("settings failed, using defaults: {err}");
-        let path = snapper_core::settings::config_path();
-        let backup = path.with_extension("toml.bad");
-        let message = match std::fs::copy(&path, &backup) {
-            Ok(_) => format!(
-                "settings could not be read ({err}). Defaults are in use, and the old file was copied to {}.",
-                backup.display()
-            ),
-            Err(_) => format!("settings could not be read ({err}). Defaults are in use."),
-        };
+    let (settings, problem) = Settings::load_or_set_aside(&snapper_core::settings::config_path());
+    if let Some(message) = problem {
+        eprintln!("{message}");
         output::notify("Snapper", &message);
-        Settings::default()
-    })
+    }
+    settings
 }
 
 fn debug_overlay() -> Result<overlay::OverlayResult, String> {

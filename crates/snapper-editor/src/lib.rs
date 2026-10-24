@@ -106,7 +106,12 @@ pub struct Item {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Edit {
     Add(Item),
-    Remove(Item),
+    /// `index` is the item's position, recorded by [`Document::apply`] so undo
+    /// puts it back in the same z-order.
+    Remove {
+        item: Item,
+        index: usize,
+    },
     Modify {
         before: Item,
         after: Item,
@@ -117,6 +122,13 @@ pub enum Edit {
         #[serde(with = "rect_serde")]
         after: Option<Rect>,
     },
+}
+
+impl Edit {
+    /// Remove `item`. The index is filled in when the edit is applied.
+    pub fn remove(item: Item) -> Self {
+        Self::Remove { item, index: 0 }
+    }
 }
 
 /// Base image, annotations, optional crop, and the undo stacks.
@@ -145,7 +157,16 @@ impl Document {
     }
 
     /// Perform `edit`, push it onto the undo stack, and drop the redo stack.
-    pub fn apply(&mut self, edit: Edit) {
+    pub fn apply(&mut self, mut edit: Edit) {
+        if let Edit::Remove { item, index } = &mut edit {
+            if let Some(found) = self
+                .items
+                .iter()
+                .position(|existing| existing.id == item.id)
+            {
+                *index = found;
+            }
+        }
         self.perform(&edit);
         self.undo.push(edit);
         self.redo.clear();
@@ -156,8 +177,13 @@ impl Document {
         let Some(edit) = self.undo.pop() else {
             return false;
         };
-        let inverse = invert(edit.clone());
-        self.perform(&inverse);
+        match &edit {
+            Edit::Remove { item, index } => {
+                let index = (*index).min(self.items.len());
+                self.items.insert(index, item.clone());
+            }
+            _ => self.perform(&invert(edit.clone())),
+        }
         self.redo.push(edit);
         true
     }
@@ -198,7 +224,7 @@ impl Document {
     fn perform(&mut self, edit: &Edit) {
         match edit {
             Edit::Add(item) => self.items.push(item.clone()),
-            Edit::Remove(item) => self.items.retain(|existing| existing.id != item.id),
+            Edit::Remove { item, .. } => self.items.retain(|existing| existing.id != item.id),
             Edit::Modify { before, after } => {
                 if let Some(slot) = self.items.iter_mut().find(|item| item.id == before.id) {
                     *slot = after.clone();
@@ -213,8 +239,8 @@ impl Document {
 
 fn invert(edit: Edit) -> Edit {
     match edit {
-        Edit::Add(item) => Edit::Remove(item),
-        Edit::Remove(item) => Edit::Add(item),
+        Edit::Add(item) => Edit::remove(item),
+        Edit::Remove { item, .. } => Edit::Add(item),
         Edit::Modify { before, after } => Edit::Modify {
             before: after,
             after: before,
@@ -223,6 +249,31 @@ fn invert(edit: Edit) -> Edit {
             before: after,
             after: before,
         },
+    }
+}
+
+/// Radius of a step marker on an image with `scale_factor`, in image pixels.
+pub fn step_radius(scale_factor: f32) -> f32 {
+    14.0 * positive_scale(scale_factor)
+}
+
+/// Average glyph advance as a fraction of the font size.
+pub const TEXT_ADVANCE: f32 = 0.6;
+
+/// Approximate box of a text item: the longest line by the line count.
+pub fn text_bounds(at: Point, text: &str, size: f32) -> RectF {
+    let columns = text
+        .lines()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(1);
+    let rows = text.lines().count().max(1);
+    RectF {
+        x: at.x,
+        y: at.y,
+        width: columns as f32 * size.abs() * TEXT_ADVANCE,
+        height: rows as f32 * size.abs(),
     }
 }
 
@@ -249,22 +300,9 @@ fn hit_item(item: &Item, point: Point, scale: f32) -> bool {
         | Shape::Blur { rect, .. }
         | Shape::Pixelate { rect, .. } => contains_rect(*rect, point, pad),
         Shape::Ellipse { rect } => contains_ellipse(*rect, point, pad),
-        Shape::Text { at, text, size } => {
-            let width = text.chars().count() as f32 * size.abs() * 0.6;
-            let height = size.abs() * text.lines().count().max(1) as f32;
-            contains_rect(
-                RectF {
-                    x: at.x,
-                    y: at.y,
-                    width,
-                    height,
-                },
-                point,
-                0.0,
-            )
-        }
+        Shape::Text { at, text, size } => contains_rect(text_bounds(*at, text, *size), point, 0.0),
         Shape::Step { at, .. } => {
-            let radius = 14.0 * scale;
+            let radius = step_radius(scale);
             let dx = point.x - at.x;
             let dy = point.y - at.y;
             dx * dx + dy * dy <= radius * radius
@@ -442,7 +480,7 @@ mod tests {
         assert!(doc.redo());
         assert_eq!(doc.items[0], after);
 
-        doc.apply(Edit::Remove(after.clone()));
+        doc.apply(Edit::remove(after.clone()));
         assert!(doc.items.is_empty());
         assert!(doc.undo());
         assert_eq!(doc.items[0].id, after.id);
@@ -472,6 +510,30 @@ mod tests {
             }
         }
         assert!(!doc.undo());
+    }
+
+    #[test]
+    fn undoing_a_remove_restores_the_z_order() {
+        let mut doc = Document::new(blank());
+        for id in 1..=3 {
+            doc.apply(Edit::Add(line(id)));
+        }
+        doc.apply(Edit::remove(line(2)));
+        doc.apply(Edit::remove(line(1)));
+        assert_eq!(doc.items, vec![line(3)]);
+        assert!(doc.undo());
+        assert!(doc.undo());
+        assert_eq!(doc.items, vec![line(1), line(2), line(3)]);
+        assert!(doc.redo());
+        assert!(doc.redo());
+        assert_eq!(doc.items, vec![line(3)]);
+    }
+
+    #[test]
+    fn text_bounds_use_the_longest_line() {
+        let rect = text_bounds(Point { x: 1.0, y: 2.0 }, "ab\nabcd", 10.0);
+        assert_eq!((rect.x, rect.y), (1.0, 2.0));
+        assert_eq!((rect.width, rect.height), (24.0, 20.0));
     }
 
     #[test]

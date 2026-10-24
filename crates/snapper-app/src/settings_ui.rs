@@ -671,16 +671,31 @@ fn uploads_tab(ui: &mut egui::Ui, settings: &mut Settings, change: &mut FieldCha
     }
     ui.add_space(8.0);
     ui.label("Discovered plugins");
+    // Discovery runs each plugin's --describe, so it runs off the UI thread.
+    type Found = std::sync::Arc<std::sync::Mutex<Option<Vec<snapper_upload::DiscoveredPlugin>>>>;
     let plugin_id = egui::Id::new("snapper-discovered-plugins");
-    let plugins = ui
+    let found = ui
         .ctx()
-        .data(|data| data.get_temp::<Vec<snapper_upload::DiscoveredPlugin>>(plugin_id))
+        .data(|data| data.get_temp::<Found>(plugin_id))
         .unwrap_or_else(|| {
-            let found = snapper_upload::discover();
+            let found = Found::default();
             ui.ctx()
                 .data_mut(|data| data.insert_temp(plugin_id, found.clone()));
+            let slot = found.clone();
+            let ctx = ui.ctx().clone();
+            std::thread::spawn(move || {
+                let plugins = snapper_upload::discover();
+                if let Ok(mut slot) = slot.lock() {
+                    *slot = Some(plugins);
+                }
+                ctx.request_repaint();
+            });
             found
         });
+    let Some(plugins) = found.lock().ok().and_then(|slot| slot.clone()) else {
+        ui.label("Looking for plugins...");
+        return;
+    };
     if plugins.is_empty() {
         ui.label("No snapper-plugin-* programs were found on PATH or in the plugins folder.");
     }
