@@ -9,3 +9,5 @@ Automatic redaction adds pixelate blocks and marks them for review. Those blocks
 Copy, Save, and Upload are on the bottom bar. Upload uses the first configured target, saves the file, copies the plain URL, and notifies you. If the upload fails, the file remains.
 
 Crop limits what is flattened. Undo and redo cover annotations and the crop.
+
+The stroke width, step markers, and new text are sized in points. On a Retina capture they are drawn at twice as many pixels, so they look the same size as on a standard display. Items already in a document keep their size.

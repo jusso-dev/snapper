@@ -435,7 +435,7 @@ impl ToolSession {
         Some(Item {
             id: self.next_id,
             shape,
-            style: self.style,
+            style: self.item_style(),
             auto: false,
         })
     }
@@ -444,11 +444,20 @@ impl ToolSession {
         let item = Item {
             id: self.next_id,
             shape,
-            style: self.style,
+            style: self.item_style(),
             auto: false,
         };
         self.next_id = self.next_id.saturating_add(1);
         item
+    }
+
+    /// The chosen style with its width, picked in logical points, converted
+    /// to image pixels so a stroke looks the same on a Retina capture.
+    fn item_style(&self) -> Style {
+        Style {
+            width: self.style.width * self.scale,
+            ..self.style
+        }
     }
 
     fn take_id(&mut self, mut item: Item) -> Item {
@@ -1167,6 +1176,25 @@ mod tests {
             Point { x: 140.0, y: 130.0 },
         );
         assert!(outside.is_none());
+    }
+
+    #[test]
+    fn strokes_scale_with_a_retina_capture() {
+        let mut tools = session();
+        let mut retina = blank();
+        retina.base.scale_factor = 2.0;
+        tools.sync(&retina);
+        tools.style.width = 4.0;
+        tools.tool = Tool::Rect;
+        let Some(Edit::Add(item)) = drag(
+            &mut tools,
+            Point { x: 10.0, y: 10.0 },
+            Point { x: 40.0, y: 40.0 },
+        ) else {
+            panic!("rectangle");
+        };
+        assert_eq!(item.style.width, 8.0);
+        assert_eq!(tools.style.width, 4.0);
     }
 
     #[test]
